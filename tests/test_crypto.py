@@ -107,6 +107,19 @@ class EncryptDecryptTestCase(unittest.TestCase):
         with self.assertRaises(crypto.DecryptionError):
             crypto.decrypt(self.key, nonce, ciphertext[:-1])
 
+    def test_a_malformed_nonce_length_raises_decryption_error_not_a_bare_value_error(self):
+        # Regression trouvee a l'audit : AESGCM.decrypt leve un ValueError
+        # brut (pas InvalidTag) pour un nonce de mauvaise longueur - un
+        # scenario realiste pour une entree corrompue par edition manuelle
+        # de la base. Avant la correction, ce ValueError remontait tel quel
+        # hors de decrypt(), non catche par Vault._decrypt_all_entries (qui
+        # n'attrapait que crypto.DecryptionError), faisant planter unlock()
+        # au lieu de traiter cette entree comme corrompue ordinaire.
+        nonce, ciphertext = crypto.encrypt(self.key, b"donnees secretes")
+        malformed_nonce = nonce[:-1]  # longueur invalide pour AES-GCM
+        with self.assertRaises(crypto.DecryptionError):
+            crypto.decrypt(self.key, malformed_nonce, ciphertext)
+
     def test_empty_plaintext_roundtrips_correctly(self):
         nonce, ciphertext = crypto.encrypt(self.key, b"")
         self.assertEqual(crypto.decrypt(self.key, nonce, ciphertext), b"")

@@ -95,6 +95,25 @@ class VaultLifecycleTestCase(unittest.TestCase):
         self.assertEqual([e["id"] for e in entries], [good_id])
         self.assertEqual(self.vault.corrupted_entry_ids, [bad_id])
 
+    def test_a_malformed_nonce_length_is_also_treated_as_a_corrupted_entry(self):
+        # Regression trouvee a l'audit : une ciphertext alteree (test
+        # ci-dessus) leve InvalidTag, deja bien geree - mais un NONCE de
+        # mauvaise longueur (autre scenario realiste de corruption) levait
+        # un ValueError brut, non catche par crypto.decrypt ni par
+        # _decrypt_all_entries, faisant planter unlock() entierement.
+        self.vault.create("mot-de-passe-maitre")
+        good_id = self.vault.add_entry("Site sain", password="secret")
+        bad_id = self.vault.add_entry("Site corrompu", password="autre-secret")
+        raw = self.vault.db.get_entry(bad_id)
+        malformed_nonce = raw["nonce"][:-1]  # longueur invalide pour AES-GCM
+        self.vault.db.update_entry(bad_id, malformed_nonce, raw["ciphertext"])
+        self.vault.lock()
+
+        self.assertTrue(self.vault.unlock("mot-de-passe-maitre"))
+        entries = self.vault.list_entries()
+        self.assertEqual([e["id"] for e in entries], [good_id])
+        self.assertEqual(self.vault.corrupted_entry_ids, [bad_id])
+
     def test_corrupted_entry_ids_is_empty_when_nothing_is_corrupted(self):
         self.vault.create("mot-de-passe-maitre")
         self.vault.add_entry("Site sain")

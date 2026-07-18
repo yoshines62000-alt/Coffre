@@ -71,8 +71,16 @@ def encrypt(key: bytes, plaintext: bytes) -> tuple:
 def decrypt(key: bytes, nonce: bytes, ciphertext: bytes) -> bytes:
     """Dechiffre et verifie l'integrite de `ciphertext`. Leve DecryptionError
     si la cle est incorrecte OU si les donnees ont ete alterees - jamais de
-    distinction entre ces deux cas (voir DecryptionError)."""
+    distinction entre ces deux cas (voir DecryptionError).
+
+    Attrape aussi ValueError (pas seulement InvalidTag) : un nonce de
+    mauvaise longueur - ex : une entree corrompue par edition manuelle de
+    la base - fait lever un ValueError brut par AESGCM.decrypt, distinct
+    d'InvalidTag, qui remontait auparavant tel quel hors de cette fonction
+    et faisait planter unlock() au lieu d'etre traite comme une entree
+    corrompue ordinaire (voir Vault._decrypt_all_entries / corrupted_entry_ids,
+    bug trouve a l'audit)."""
     try:
         return AESGCM(key).decrypt(nonce, ciphertext, None)
-    except InvalidTag as exc:
+    except (InvalidTag, ValueError) as exc:
         raise DecryptionError("Mot de passe incorrect ou donnees corrompues.") from exc
