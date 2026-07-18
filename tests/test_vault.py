@@ -153,6 +153,41 @@ class EntryCrudTestCase(unittest.TestCase):
         self.assertNotIn(b"MotDePasseTresSecret", raw_rows[0]["ciphertext"])
         self.assertNotIn(b"Site secret", raw_rows[0]["ciphertext"])
 
+    def test_find_reused_passwords_groups_entries_sharing_the_same_password(self):
+        self.vault.add_entry("Site A", password="partage123")
+        self.vault.add_entry("Site B", password="partage123")
+        self.vault.add_entry("Site C", password="unique456")
+        groups = self.vault.find_reused_passwords()
+        self.assertEqual(len(groups), 1)
+        titles = sorted(e["title"] for e in groups[0])
+        self.assertEqual(titles, ["Site A", "Site B"])
+
+    def test_find_reused_passwords_returns_empty_when_all_passwords_are_distinct(self):
+        self.vault.add_entry("Site A", password="a")
+        self.vault.add_entry("Site B", password="b")
+        self.assertEqual(self.vault.find_reused_passwords(), [])
+
+    def test_find_reused_passwords_ignores_entries_with_no_password(self):
+        self.vault.add_entry("Site A", password="")
+        self.vault.add_entry("Site B", password="")
+        self.assertEqual(self.vault.find_reused_passwords(), [])
+
+    def test_find_reused_passwords_supports_more_than_two_entries_in_a_group(self):
+        self.vault.add_entry("Site A", password="commun")
+        self.vault.add_entry("Site B", password="commun")
+        self.vault.add_entry("Site C", password="commun")
+        groups = self.vault.find_reused_passwords()
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(groups[0]), 3)
+
+    def test_find_reused_passwords_detects_multiple_independent_groups(self):
+        self.vault.add_entry("Site A", password="groupe1")
+        self.vault.add_entry("Site B", password="groupe1")
+        self.vault.add_entry("Site C", password="groupe2")
+        self.vault.add_entry("Site D", password="groupe2")
+        groups = self.vault.find_reused_passwords()
+        self.assertEqual(len(groups), 2)
+
 
 class ChangeMasterPasswordTestCase(unittest.TestCase):
     def setUp(self):

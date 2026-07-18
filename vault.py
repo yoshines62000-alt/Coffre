@@ -171,6 +171,24 @@ class Vault:
         self.db.delete_entry(entry_id)
         self._entries = [e for e in self._entries if e["id"] != entry_id]
 
+    def find_reused_passwords(self) -> list:
+        """Groupe les entrees qui partagent EXACTEMENT le meme mot de passe.
+        Ne renvoie que les groupes de 2 entrees ou plus - une entree seule
+        n'est jamais un "mot de passe reutilise". Les entrees sans mot de
+        passe (champ vide) sont ignorees : un champ vide n'est pas un
+        secret partage, juste une absence de valeur. Le mot de passe
+        lui-meme n'est jamais renvoye ici (seulement les entrees qui le
+        partagent) - cette fonction sert a alerter, pas a afficher les
+        secrets en clair dans un rapport."""
+        self._require_unlocked()
+        groups: dict = {}
+        for entry in self._entries:
+            password = entry.get("password", "")
+            if not password:
+                continue
+            groups.setdefault(password, []).append(entry)
+        return [entries for entries in groups.values() if len(entries) > 1]
+
     # -- mot de passe maitre ----------------------------------------------------
 
     def change_master_password(self, current_password: str, new_password: str) -> None:

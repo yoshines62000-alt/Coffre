@@ -240,6 +240,7 @@ class CoffreApp:
         search_entry.pack(side=LEFT, padx=5)
         self.search_var.trace_add("write", lambda *_: self._refresh_entries())
         ttk.Button(top, text="Generateur...", command=self._open_generator_dialog).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top, text="Mots de passe reutilises...", command=self._open_reused_passwords_dialog).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
         ttk.Button(top, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT, padx=(0, 10))
 
@@ -468,6 +469,40 @@ class CoffreApp:
             ttk.Button(buttons, text="Fermer", command=dialog.destroy).pack(side=LEFT, padx=5)
 
         do_generate()
+
+    # -- mots de passe reutilises -------------------------------------------------
+
+    def _open_reused_passwords_dialog(self):
+        groups = self.vault.find_reused_passwords()
+
+        dialog = Toplevel(self.root)
+        self._open_dialogs.append(dialog)
+        dialog.title("Mots de passe reutilises")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        if not groups:
+            ttk.Label(
+                dialog, text="Aucun mot de passe n'est reutilise entre plusieurs entrees.",
+                foreground="black", font=BODY_FONT,
+            ).pack(padx=15, pady=15)
+        else:
+            plural = "s" if len(groups) > 1 else ""
+            ttk.Label(
+                dialog,
+                text=f"{len(groups)} mot{plural} de passe partage{plural} entre plusieurs entrees "
+                "(le mot de passe lui-meme n'est jamais affiche ici) :",
+                foreground="black", font=BODY_FONT, wraplength=380, justify="left",
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+            for entries in groups:
+                titles = ", ".join(sorted(e["title"] for e in entries))
+                ttk.Label(
+                    dialog, text=f"- {titles}", foreground="black", font=BODY_FONT,
+                    wraplength=380, justify="left",
+                ).pack(anchor="w", padx=25)
+
+        ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)
 
     # -- changement de mot de passe maitre ---------------------------------------
 
