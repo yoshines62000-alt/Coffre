@@ -334,8 +334,38 @@ class CoffreApp:
             strength_var.set(f"Solidite : {strength['label']}" if password_var.get() else "")
             strength_label.configure(foreground=_STRENGTH_COLORS[strength["score"]])
 
-        password_var.trace_add("write", update_strength)
+        strength_trace_id = password_var.trace_add("write", update_strength)
         update_strength()
+
+        def remove_strength_trace(event=None):
+            # Sans ce retrait explicite, la fermeture Tcl garde le callback
+            # (et donc `password_var`, qui contient le mot de passe en
+            # clair) vivant indefiniment dans l'interprete - meme apres
+            # dialog.destroy(), meme apres un verrouillage du coffre (bug
+            # trouve a l'audit : ceci contredisait la garantie documentee
+            # dans vault.py selon laquelle lock() rend tout le materiel
+            # dechiffre eligible au ramasse-miettes). Lie a <Destroy> plutot
+            # qu'aux seuls boutons Enregistrer/Annuler : <Destroy> se
+            # declenche aussi si la fenetre est fermee par sa croix, ou si
+            # _close_all_dialogs() la ferme de force au verrouillage.
+            #
+            # Lie sur password_entry (le widget qui possede reellement le
+            # lien -textvariable), PAS sur dialog : un widget herite de son
+            # toplevel une balise de liaison partagee (bindtags), si bien
+            # qu'un bind sur `dialog` se declenche aussi pour CHAQUE enfant
+            # detruit (labels, boutons...), bien avant password_entry
+            # lui-meme - Tk a alors deja nettoye la trace en meme temps que
+            # le lien -textvariable de password_entry, et notre propre appel
+            # explicite echoue silencieusement (leve puis avale une
+            # TclError) sans jamais avoir vraiment supprime quoi que ce
+            # soit d'utile, laissant `password_var` (et le mot de passe en
+            # clair qu'elle contient) vivant via la fermeture de
+            # update_strength (bug constate en testant le correctif
+            # initial). Lie directement sur password_entry, ce
+            # <Destroy> se declenche une seule fois, au bon moment.
+            password_var.trace_remove("write", strength_trace_id)
+
+        password_entry.bind("<Destroy>", remove_strength_trace, add="+")
 
         ttk.Button(
             dialog, text="Generer...",

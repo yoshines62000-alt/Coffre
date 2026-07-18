@@ -275,6 +275,23 @@ class PasswordStrengthTestCase(unittest.TestCase):
         result = password_strength(pw)
         self.assertGreaterEqual(result["score"], 2)
 
+    def test_a_heavily_repeated_character_is_never_rated_very_strong(self):
+        # Regression trouvee a l'audit : la formule charset x longueur
+        # notait "aaaaaaaaaaaaaaaaaaaa" (20 caracteres, un seul alphabet)
+        # "Tres forte" (score maximal) - une fausse confiance dangereuse
+        # pour un indicateur cense guider l'utilisateur.
+        result = password_strength("a" * 20)
+        self.assertLessEqual(result["score"], 1)
+
+    def test_repetition_penalty_never_affects_a_password_with_no_repeated_character(self):
+        # Un mot de passe sans aucune repetition (ratio de caracteres
+        # distincts = 1.0) ne doit jamais etre penalise : la penalite ne
+        # doit affecter que les mots de passe reellement repetitifs.
+        without_penalty = password_strength("aB3!cD5@fG")
+        distinct_ratio = len(set("aB3!cD5@fG")) / len("aB3!cD5@fG")
+        self.assertEqual(distinct_ratio, 1.0)
+        self.assertGreaterEqual(without_penalty["score"], 3)
+
 
 class GeneratePasswordTestCase(unittest.TestCase):
     def test_generated_password_has_the_requested_length(self):

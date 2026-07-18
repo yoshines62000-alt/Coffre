@@ -256,6 +256,18 @@ def password_strength(password: str) -> dict:
 
     bits = len(password) * math.log2(charset_size) if charset_size > 0 else 0.0
 
+    # Penalite de repetition : le calcul ci-dessus suppose que chaque
+    # position est independante et tiree de tout l'alphabet detecte, ce qui
+    # surestime enormement un mot de passe fortement repete (ex:
+    # "aaaaaaaaaaaaaaaaaaaa", 20 caracteres d'un seul alphabet, notee
+    # "Tres forte" par la seule formule ci-dessus - bug trouve a l'audit :
+    # une fausse confiance, le pire type d'erreur pour cet indicateur).
+    # `distinct_ratio` mesure la part de caracteres reellement distincts ;
+    # un mot de passe sans repetition (ratio 1.0) n'est jamais penalise, ce
+    # qui preserve le classement par nombre de categories de caracteres.
+    distinct_ratio = len(set(password)) / len(password)
+    bits *= distinct_ratio
+
     if bits < 28:
         score = 0
     elif bits < 36:
