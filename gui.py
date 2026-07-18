@@ -20,6 +20,20 @@ DONATE_URL = "https://ko-fi.com/yoshines62000"
 AUTO_LOCK_SECONDS = 300
 CLIPBOARD_CLEAR_SECONDS = 20
 
+# Police explicite pour tout label de texte normal (noir). Constate a la
+# verification visuelle et isole en dehors de tout code Coffre : un
+# ttk.Label colore (ex: le lien de don ci-dessous) utilisant la police PAR
+# DEFAUT (non precisee) fait ensuite s'afficher tout AUTRE label partageant
+# cette meme police par defaut dans une couleur fausse (bordeaux au lieu de
+# noir) - meme avec foreground="black" defini explicitement dessus. Un
+# veritable bug de rendu (contexte graphique de texte partage/corrompu par
+# police) sur cet environnement, reproduit en isolation totale, y compris
+# avec un tk.Label classique (donc pas specifique a ttk) et quel que soit
+# le theme ttk actif. Donner a ces labels une police EXPLICITEMENT
+# DIFFERENTE de celle du lien de don (qui reste sur la police par defaut)
+# les met dans un contexte graphique distinct et evite le bug.
+BODY_FONT = ("Segoe UI", 10)
+
 
 def _resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -37,11 +51,37 @@ class CoffreApp:
         self.root.geometry("900x580")
         self.root.minsize(700, 450)
 
-        self.vault = Vault(_data_dir() / "coffre.sqlite")
+        # "alt" est un theme entierement rendu par Tk (jamais delegue a
+        # l'API de theming Windows), visuellement tres proche du rendu
+        # natif "vista". Voir aussi BODY_FONT plus haut pour le contexte
+        # complet du bug de rendu constate sur cet environnement.
+        ttk.Style(self.root).theme_use("alt")
+
+        try:
+            self.vault = Vault(_data_dir() / "coffre.sqlite")
+        except Exception as exc:
+            # Fichier de coffre corrompu (pas un fichier SQLite valide,
+            # disque plein en cours d'ecriture precedente...) : un plantage
+            # silencieux au demarrage, sans le moindre message, laisserait
+            # l'utilisateur croire que l'application est cassee alors que
+            # le probleme vient specifiquement du fichier de donnees.
+            messagebox.showerror(
+                APP_TITLE,
+                "Impossible d'ouvrir le fichier du coffre (fichier corrompu ou "
+                f"illisible) :\n{exc}",
+            )
+            self.root.destroy()
+            raise SystemExit(1)
         self._clipboard_pending_value = None
         self._auto_lock_job = None
         self._last_activity = time.monotonic()
         self._selected_entry_id = None
+        # Tout Toplevel ouvert (edition d'entree, generateur, changement de
+        # mot de passe) doit etre ferme de force au verrouillage : sinon un
+        # dialogue deja ouvert (ex: mot de passe affiche en clair via
+        # "Afficher") resterait visible a l'ecran meme apres que le coffre
+        # soit verrouille, contredisant la garantie meme du verrouillage.
+        self._open_dialogs: list = []
 
         icon_path = _resource_path("icon.ico")
         if icon_path.exists():
@@ -69,70 +109,111 @@ class CoffreApp:
         self._show_unlock_screen()
 
     # -- ecran de creation / deverrouillage -------------------------------------
+    #
+    # Les deux sous-ecrans (creation du coffre / deverrouillage) sont
+    # construits UNE SEULE FOIS puis seulement affiches/masques ensuite via
+    # pack()/pack_forget() (jamais detruits) - defense en profondeur, sans
+    # rapport direct avec le bug de police documente pres de BODY_FONT.
+
+    def _build_creation_screen(self, center):
+        frame = ttk.Frame(center)
+        # Deux ttk.Label separes plutot qu'un texte "\n" : plus lisible a
+        # composer avec BODY_FONT, sans autre raison particuliere ici.
+        ttk.Label(frame, text="Aucun coffre n'existe encore sur cette machine.", foreground="black", font=BODY_FONT).pack()
+        ttk.Label(frame, text="Creez un mot de passe maitre pour commencer.", foreground="black", font=BODY_FONT).pack(pady=(0, 15))
+        ttk.Label(frame, text="Nouveau mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        self._create_password_var = StringVar()
+        entry1 = ttk.Entry(frame, textvariable=self._create_password_var, show="*", width=32)
+        entry1.pack(pady=(0, 8))
+        self._create_confirm_var = StringVar()
+        ttk.Label(frame, text="Confirmer le mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        entry2 = ttk.Entry(frame, textvariable=self._create_confirm_var, show="*", width=32)
+        entry2.pack(pady=(0, 8))
+        ttk.Label(
+            frame, text="⚠️ Il n'existe AUCUN moyen de recuperer ce mot de passe s'il est",
+            foreground="#B00020",
+        ).pack()
+        ttk.Label(
+            frame, text="oublie : il sert lui-meme a chiffrer le coffre, il n'est stocke nulle part.",
+            foreground="#B00020",
+        ).pack(pady=(0, 12))
+
+        def on_create():
+            if self._create_password_var.get() != self._create_confirm_var.get():
+                messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
+                return
+            try:
+                self.vault.create(self._create_password_var.get())
+            except VaultError as exc:
+                messagebox.showwarning(APP_TITLE, str(exc))
+                return
+            self._create_password_var.set("")
+            self._create_confirm_var.set("")
+            self._show_vault_screen()
+
+        ttk.Button(frame, text="Creer le coffre", command=on_create).pack()
+        self._focus_creation_entry = entry1
+        entry1.bind("<Return>", lambda event: entry2.focus_set())
+        entry2.bind("<Return>", lambda event: on_create())
+        return frame
+
+    def _build_unlock_only_screen(self, center):
+        frame = ttk.Frame(center)
+        ttk.Label(frame, text="Mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        self._unlock_password_var = StringVar()
+        entry = ttk.Entry(frame, textvariable=self._unlock_password_var, show="*", width=32)
+        entry.pack(pady=(0, 8))
+        self._unlock_status_var = StringVar()
+        ttk.Label(frame, textvariable=self._unlock_status_var, foreground="#B00020").pack(pady=(0, 8))
+
+        def on_unlock():
+            if self.vault.unlock(self._unlock_password_var.get()):
+                self._unlock_password_var.set("")
+                self._unlock_status_var.set("")
+                self._show_vault_screen()
+                if self.vault.corrupted_entry_ids:
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        f"{len(self.vault.corrupted_entry_ids)} entree(s) n'ont pas pu etre "
+                        "dechiffrees (donnees corrompues) et n'apparaissent pas dans la liste. "
+                        "Les autres entrees restent accessibles normalement.",
+                    )
+            else:
+                self._unlock_status_var.set("Mot de passe incorrect.")
+                self._unlock_password_var.set("")
+
+        ttk.Button(frame, text="Deverrouiller", command=on_unlock).pack()
+        self._focus_unlock_entry = entry
+        entry.bind("<Return>", lambda event: on_unlock())
+        return frame
 
     def _show_unlock_screen(self):
         self.vault_frame.pack_forget()
-        for widget in self.unlock_frame.winfo_children():
-            widget.destroy()
 
-        center = ttk.Frame(self.unlock_frame)
-        center.place(relx=0.5, rely=0.4, anchor="center")
-
-        ttk.Label(center, text="🔒 Coffre", font=("Segoe UI", 20, "bold")).pack(pady=(0, 15))
-
-        password_var = StringVar()
+        if not hasattr(self, "_unlock_center"):
+            self._unlock_center = ttk.Frame(self.unlock_frame)
+            self._unlock_center.place(relx=0.5, rely=0.4, anchor="center")
+            ttk.Label(
+                self._unlock_center, text="🔒 Coffre", font=("Segoe UI", 20, "bold"), foreground="black",
+            ).pack(pady=(0, 15))
+            self._creation_screen = None
+            self._unlock_only_screen = None
 
         if not self.vault.exists():
-            ttk.Label(
-                center, text="Aucun coffre n'existe encore sur cette machine.\nCreez un mot de passe maitre pour commencer.",
-                justify="center",
-            ).pack(pady=(0, 15))
-            ttk.Label(center, text="Nouveau mot de passe maitre").pack(anchor="w")
-            entry1 = ttk.Entry(center, textvariable=password_var, show="*", width=32)
-            entry1.pack(pady=(0, 8))
-            confirm_var = StringVar()
-            ttk.Label(center, text="Confirmer le mot de passe maitre").pack(anchor="w")
-            entry2 = ttk.Entry(center, textvariable=confirm_var, show="*", width=32)
-            entry2.pack(pady=(0, 8))
-            ttk.Label(
-                center,
-                text="⚠️ Il n'existe AUCUN moyen de recuperer ce mot de passe s'il est\n"
-                "oublie : il sert lui-meme a chiffrer le coffre, il n'est stocke nulle part.",
-                foreground="#B00020", justify="center", wraplength=380,
-            ).pack(pady=(0, 12))
-
-            def on_create():
-                if password_var.get() != confirm_var.get():
-                    messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
-                    return
-                try:
-                    self.vault.create(password_var.get())
-                except VaultError as exc:
-                    messagebox.showwarning(APP_TITLE, str(exc))
-                    return
-                self._show_vault_screen()
-
-            ttk.Button(center, text="Creer le coffre", command=on_create).pack()
-            entry1.focus_set()
-            entry1.bind("<Return>", lambda event: entry2.focus_set())
-            entry2.bind("<Return>", lambda event: on_create())
+            if self._creation_screen is None:
+                self._creation_screen = self._build_creation_screen(self._unlock_center)
+            if self._unlock_only_screen is not None:
+                self._unlock_only_screen.pack_forget()
+            self._creation_screen.pack()
+            self._focus_creation_entry.focus_set()
         else:
-            ttk.Label(center, text="Mot de passe maitre").pack(anchor="w")
-            entry = ttk.Entry(center, textvariable=password_var, show="*", width=32)
-            entry.pack(pady=(0, 8))
-            status_var = StringVar()
-            ttk.Label(center, textvariable=status_var, foreground="#B00020").pack(pady=(0, 8))
-
-            def on_unlock():
-                if self.vault.unlock(password_var.get()):
-                    self._show_vault_screen()
-                else:
-                    status_var.set("Mot de passe incorrect.")
-                    password_var.set("")
-
-            ttk.Button(center, text="Deverrouiller", command=on_unlock).pack()
-            entry.focus_set()
-            entry.bind("<Return>", lambda event: on_unlock())
+            if self._unlock_only_screen is None:
+                self._unlock_only_screen = self._build_unlock_only_screen(self._unlock_center)
+            if self._creation_screen is not None:
+                self._creation_screen.pack_forget()
+            self._unlock_only_screen.pack()
+            self._unlock_status_var.set("")
+            self._focus_unlock_entry.focus_set()
 
         self.unlock_frame.pack(fill=BOTH, expand=True)
 
@@ -153,7 +234,7 @@ class CoffreApp:
 
         top = ttk.Frame(frame)
         top.pack(fill=X, padx=10, pady=10)
-        ttk.Label(top, text="Rechercher :").pack(side=LEFT)
+        ttk.Label(top, text="Rechercher :", foreground="black", font=BODY_FONT).pack(side=LEFT)
         self.search_var = StringVar()
         search_entry = ttk.Entry(top, textvariable=self.search_var, width=30)
         search_entry.pack(side=LEFT, padx=5)
@@ -214,6 +295,7 @@ class CoffreApp:
         entry = self.vault.get_entry(entry_id) if entry_id is not None else None
 
         dialog = Toplevel(self.root)
+        self._open_dialogs.append(dialog)
         dialog.title("Modifier l'entree" if entry else "Ajouter une entree")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -225,14 +307,14 @@ class CoffreApp:
         url_var = StringVar(value=entry["url"] if entry else "")
         show_password = BooleanVar(value=False)
 
-        ttk.Label(dialog, text="Titre").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Titre", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         title_entry = ttk.Entry(dialog, textvariable=title_var, width=40)
         title_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=(10, 0), sticky="we")
 
-        ttk.Label(dialog, text="Identifiant").grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Identifiant", foreground="black", font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=username_var, width=40).grid(row=1, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
-        ttk.Label(dialog, text="Mot de passe").grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Mot de passe", foreground="black", font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
         password_entry = ttk.Entry(dialog, textvariable=password_var, show="*", width=30)
         password_entry.grid(row=2, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
 
@@ -246,10 +328,10 @@ class CoffreApp:
             command=lambda: self._open_generator_dialog(target_var=password_var, parent=dialog),
         ).grid(row=3, column=1, sticky="w", padx=10, pady=(2, 0))
 
-        ttk.Label(dialog, text="Site / URL").grid(row=4, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Site / URL", foreground="black", font=BODY_FONT).grid(row=4, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=url_var, width=40).grid(row=4, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
-        ttk.Label(dialog, text="Notes").grid(row=5, column=0, sticky="nw", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Notes", foreground="black", font=BODY_FONT).grid(row=5, column=0, sticky="nw", padx=10, pady=(5, 0))
         from tkinter import Text
         notes_text = Text(dialog, width=40, height=5, wrap="word")
         notes_text.insert("1.0", entry["notes"] if entry else "")
@@ -328,6 +410,7 @@ class CoffreApp:
 
     def _open_generator_dialog(self, target_var=None, parent=None):
         dialog = Toplevel(parent or self.root)
+        self._open_dialogs.append(dialog)
         dialog.title("Generateur de mot de passe")
         dialog.transient(parent or self.root)
         dialog.grab_set()
@@ -341,7 +424,7 @@ class CoffreApp:
         avoid_ambiguous = BooleanVar(value=True)
         result_var = StringVar()
 
-        ttk.Label(dialog, text="Longueur").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Longueur", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         ttk.Spinbox(dialog, from_=4, to=128, textvariable=length_var, width=6).grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
 
         ttk.Checkbutton(dialog, text="Majuscules (A-Z)", variable=use_upper).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
@@ -390,6 +473,7 @@ class CoffreApp:
 
     def _open_change_password_dialog(self):
         dialog = Toplevel(self.root)
+        self._open_dialogs.append(dialog)
         dialog.title("Changer le mot de passe maitre")
         dialog.transient(self.root)
         dialog.grab_set()
@@ -399,11 +483,11 @@ class CoffreApp:
         new_var = StringVar()
         confirm_var = StringVar()
 
-        ttk.Label(dialog, text="Mot de passe actuel").grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Mot de passe actuel", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         ttk.Entry(dialog, textvariable=current_var, show="*", width=32).grid(row=0, column=1, padx=10, pady=(10, 0))
-        ttk.Label(dialog, text="Nouveau mot de passe").grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Nouveau mot de passe", foreground="black", font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=new_var, show="*", width=32).grid(row=1, column=1, padx=10, pady=(5, 0))
-        ttk.Label(dialog, text="Confirmer le nouveau").grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Confirmer le nouveau", foreground="black", font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=confirm_var, show="*", width=32).grid(row=2, column=1, padx=10, pady=(5, 0))
 
         def on_save():
@@ -439,10 +523,30 @@ class CoffreApp:
             return
         self._auto_lock_job = self.root.after(1000, self._check_auto_lock)
 
+    def _close_all_dialogs(self):
+        """Detruit de force tout Toplevel encore ouvert (edition, generateur,
+        changement de mot de passe) - indispensable au verrouillage : un
+        dialogue laisse ouvert pourrait encore afficher un mot de passe
+        dechiffre en clair (case "Afficher" cochee) meme apres que le
+        coffre soit verrouille."""
+        for dialog in self._open_dialogs:
+            try:
+                if dialog.winfo_exists():
+                    dialog.destroy()
+            except Exception:
+                pass
+        self._open_dialogs = []
+
     def _lock_vault(self):
         if self._auto_lock_job is not None:
             self.root.after_cancel(self._auto_lock_job)
             self._auto_lock_job = None
+        self._close_all_dialogs()
+        if hasattr(self, "entries_tree"):
+            # Vide la liste affichee (titres/identifiants/URL dechiffres)
+            # plutot que de la laisser en memoire jusqu'au prochain
+            # deverrouillage reussi.
+            self.entries_tree.delete(*self.entries_tree.get_children())
         self.vault.lock()
         self._selected_entry_id = None
         self._show_unlock_screen()
@@ -450,6 +554,18 @@ class CoffreApp:
     # -- fermeture ----------------------------------------------------------------
 
     def _on_close(self):
+        # root.destroy() arrete la boucle Tkinter : tout root.after(...)
+        # deja programme pour effacer le presse-papier (voir _copy_field)
+        # ne s'executera donc jamais si l'app se ferme avant son delai -
+        # sans ce nettoyage explicite ici, un mot de passe copie juste
+        # avant de quitter resterait indefiniment dans le presse-papier
+        # Windows apres la fermeture de l'application.
+        if self._clipboard_pending_value is not None:
+            try:
+                if self.root.clipboard_get() == self._clipboard_pending_value:
+                    self.root.clipboard_clear()
+            except Exception:
+                pass
         self.vault.close()
         self.root.destroy()
 

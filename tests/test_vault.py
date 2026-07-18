@@ -77,6 +77,31 @@ class VaultLifecycleTestCase(unittest.TestCase):
         self.assertEqual(entries[0]["url"], "https://x.example")
         self.assertEqual(entries[0]["notes"], "note")
 
+    def test_a_single_corrupted_entry_does_not_prevent_unlocking_the_rest_of_the_vault(self):
+        # Trouve a l'audit : une seule entree alteree sur le disque (bit
+        # rot, ecriture partielle, edition manuelle de la base) ne doit
+        # jamais rendre TOUT le coffre inaccessible.
+        self.vault.create("mot-de-passe-maitre")
+        good_id = self.vault.add_entry("Site sain", password="secret")
+        bad_id = self.vault.add_entry("Site corrompu", password="autre-secret")
+        raw = self.vault.db.get_entry(bad_id)
+        tampered = bytearray(raw["ciphertext"])
+        tampered[0] ^= 0xFF
+        self.vault.db.update_entry(bad_id, raw["nonce"], bytes(tampered))
+        self.vault.lock()
+
+        self.assertTrue(self.vault.unlock("mot-de-passe-maitre"))
+        entries = self.vault.list_entries()
+        self.assertEqual([e["id"] for e in entries], [good_id])
+        self.assertEqual(self.vault.corrupted_entry_ids, [bad_id])
+
+    def test_corrupted_entry_ids_is_empty_when_nothing_is_corrupted(self):
+        self.vault.create("mot-de-passe-maitre")
+        self.vault.add_entry("Site sain")
+        self.vault.lock()
+        self.vault.unlock("mot-de-passe-maitre")
+        self.assertEqual(self.vault.corrupted_entry_ids, [])
+
 
 class EntryCrudTestCase(unittest.TestCase):
     def setUp(self):
@@ -166,6 +191,22 @@ class ChangeMasterPasswordTestCase(unittest.TestCase):
         self.addCleanup(reopened.close)
         self.assertTrue(reopened.unlock("nouveau-mot-de-passe"))
         entries = reopened.list_entries()
+        self.assertEqual(entries[0]["password"], "secret123")
+
+    def test_a_storage_failure_during_change_master_password_leaves_the_old_password_working(self):
+        # Simule un echec disque/DB au moment precis ou change_master_password
+        # ecrit le resultat (replace_all_entries_and_meta) : le mot de passe
+        # ACTUEL doit continuer a fonctionner apres l'echec - jamais d'etat
+        # ou ni l'ancien ni le nouveau mot de passe ne marchent.
+        from unittest.mock import patch
+
+        with patch.object(self.vault.db, "replace_all_entries_and_meta", side_effect=RuntimeError("disque plein")):
+            with self.assertRaises(RuntimeError):
+                self.vault.change_master_password("ancien-mot-de-passe", "nouveau-mot-de-passe")
+
+        self.vault.lock()
+        self.assertTrue(self.vault.unlock("ancien-mot-de-passe"))
+        entries = self.vault.list_entries()
         self.assertEqual(entries[0]["password"], "secret123")
 
 

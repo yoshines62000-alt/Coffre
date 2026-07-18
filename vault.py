@@ -46,6 +46,7 @@ class Vault:
         self.db = Database(db_path)
         self._key: Optional[bytes] = None
         self._entries: Optional[list] = None
+        self.corrupted_entry_ids: list = []
 
     def close(self) -> None:
         self.lock()
@@ -80,7 +81,14 @@ class Vault:
     def unlock(self, master_password: str) -> bool:
         """Tente de deverrouiller le coffre. Renvoie False si le mot de
         passe est incorrect (ne leve jamais d'exception pour ce cas normal
-        et attendu - reserve VaultError aux erreurs d'utilisation)."""
+        et attendu - reserve VaultError aux erreurs d'utilisation).
+
+        Une entree individuellement corrompue (alteration disque, edition
+        manuelle de la base...) est exclue de la liste plutot que de faire
+        remonter DecryptionError et bloquer l'acces a TOUTES les autres
+        entrees saines - son id reste consultable via
+        `corrupted_entry_ids` pour que l'appelant puisse avertir
+        l'utilisateur sans pour autant lui refuser tout le coffre."""
         meta = self.db.get_vault_meta()
         if meta is None:
             raise VaultError("Aucun coffre n'a encore ete cree.")
@@ -90,12 +98,13 @@ class Vault:
         except crypto.DecryptionError:
             return False
         self._key = key
-        self._entries = self._decrypt_all_entries()
+        self._entries, self.corrupted_entry_ids = self._decrypt_all_entries()
         return True
 
     def lock(self) -> None:
         self._key = None
         self._entries = None
+        self.corrupted_entry_ids = []
 
     def _decode_entry(self, row) -> dict:
         payload = json.loads(crypto.decrypt(self._key, row["nonce"], row["ciphertext"]).decode("utf-8"))
@@ -104,8 +113,15 @@ class Vault:
         payload["updated_at"] = row["updated_at"]
         return payload
 
-    def _decrypt_all_entries(self) -> list:
-        return [self._decode_entry(row) for row in self.db.list_entries()]
+    def _decrypt_all_entries(self) -> tuple:
+        entries = []
+        corrupted_ids = []
+        for row in self.db.list_entries():
+            try:
+                entries.append(self._decode_entry(row))
+            except crypto.DecryptionError:
+                corrupted_ids.append(row["id"])
+        return entries, corrupted_ids
 
     def _encrypt_payload(self, entry: dict) -> tuple:
         payload = {field: entry.get(field, "") for field in _ENTRY_FIELDS}
@@ -187,7 +203,7 @@ class Vault:
         self.db.replace_all_entries_and_meta(re_encrypted, new_salt, new_verifier_nonce, new_verifier_ciphertext)
 
         self._key = new_key
-        self._entries = self._decrypt_all_entries()
+        self._entries, self.corrupted_entry_ids = self._decrypt_all_entries()
 
 
 def generate_password(

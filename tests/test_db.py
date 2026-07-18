@@ -104,6 +104,35 @@ class EntriesTestCase(unittest.TestCase):
         self.assertEqual(meta["verifier_nonce"], b"nouveau-nonce-meta")
         self.assertEqual(self.db.get_entry(entry_id)["ciphertext"], b"nouveau-cipher")
 
+    def test_replace_all_entries_and_meta_rolls_back_entirely_on_a_partial_failure(self):
+        # Le pire scenario possible pour un changement de mot de passe
+        # maitre : une partie des entrees rechiffrees, mais pas les
+        # metadonnees (ou l'inverse) - le coffre deviendrait alors
+        # irrecuperable avec N'IMPORTE QUEL mot de passe. Force une
+        # exception APRES la premiere entree traitee (deuxieme tuple
+        # volontairement malforme) pour verifier que le rollback annule
+        # bien TOUT, y compris la premiere entree deja "reussie".
+        self.db.set_vault_meta(b"ancien-sel", b"ancien-nonce", b"ancien-cipher")
+        entry_id_1 = self.db.add_entry(b"nonce1", b"cipher1")
+        entry_id_2 = self.db.add_entry(b"nonce2", b"cipher2")
+
+        with self.assertRaises(Exception):
+            self.db.replace_all_entries_and_meta(
+                [
+                    (entry_id_1, b"nouveau-nonce1", b"nouveau-cipher1"),
+                    ("id-invalide-pas-un-entier",),  # provoque une erreur au deballage du tuple
+                ],
+                b"nouveau-sel", b"nouveau-nonce-meta", b"nouveau-cipher-meta",
+            )
+
+        # Rien n'a change : ni la premiere entree "reussie", ni la seconde,
+        # ni les metadonnees du coffre.
+        self.assertEqual(self.db.get_entry(entry_id_1)["ciphertext"], b"cipher1")
+        self.assertEqual(self.db.get_entry(entry_id_2)["ciphertext"], b"cipher2")
+        meta = self.db.get_vault_meta()
+        self.assertEqual(meta["kdf_salt"], b"ancien-sel")
+        self.assertEqual(meta["verifier_nonce"], b"ancien-nonce")
+
     def test_data_persists_after_closing_and_reopening_the_database_file(self):
         entry_id = self.db.add_entry(b"nonce", b"cipher-persistant")
         self.db.set_vault_meta(b"sel-persistant", b"nonce-meta", b"cipher-meta")

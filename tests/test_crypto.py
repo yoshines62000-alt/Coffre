@@ -121,6 +121,16 @@ class EncryptDecryptTestCase(unittest.TestCase):
         nonce, ciphertext = crypto.encrypt(self.key, plaintext)
         self.assertEqual(crypto.decrypt(self.key, nonce, ciphertext), plaintext)
 
+    def test_nonces_stay_unique_across_a_large_number_of_encryptions_with_the_same_key(self):
+        # Un seul nonce reutilise avec la meme cle romprait totalement la
+        # confidentialite d'AES-GCM - un test comparant seulement 2 appels
+        # (voir test_encrypting_the_same_plaintext_twice_produces_different_ciphertexts)
+        # ne suffit pas a couvrir ce risque a l'echelle reelle d'un coffre
+        # contenant des dizaines d'entrees, ni le cas d'un changement de mot
+        # de passe maitre qui rechiffre toutes les entrees dans une boucle.
+        nonces = {crypto.encrypt(self.key, f"entree {i}".encode())[0] for i in range(500)}
+        self.assertEqual(len(nonces), 500)
+
 
 if __name__ == "__main__":
     unittest.main()
