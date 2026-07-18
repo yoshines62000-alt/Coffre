@@ -13,7 +13,7 @@ from tkinter import (
     BooleanVar, IntVar, StringVar, Tk, Toplevel, ttk, messagebox,
 )
 
-from vault import Vault, VaultError, generate_password
+from vault import Vault, VaultError, generate_password, password_strength
 
 APP_TITLE = "Coffre"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
@@ -323,6 +323,19 @@ class CoffreApp:
             password_entry.configure(show="" if show_password.get() else "*")
 
         ttk.Checkbutton(dialog, text="Afficher", variable=show_password, command=toggle_show).grid(row=2, column=2, padx=(5, 10), pady=(5, 0))
+
+        strength_var = StringVar()
+        strength_label = ttk.Label(dialog, textvariable=strength_var, font=BODY_FONT)
+        strength_label.grid(row=3, column=2, sticky="w", padx=(5, 10), pady=(2, 0))
+        _STRENGTH_COLORS = {0: "#B00020", 1: "#B00020", 2: "#B37B00", 3: "#1B7A1B", 4: "#1B7A1B"}
+
+        def update_strength(*_args):
+            strength = password_strength(password_var.get())
+            strength_var.set(f"Solidite : {strength['label']}" if password_var.get() else "")
+            strength_label.configure(foreground=_STRENGTH_COLORS[strength["score"]])
+
+        password_var.trace_add("write", update_strength)
+        update_strength()
 
         ttk.Button(
             dialog, text="Generer...",

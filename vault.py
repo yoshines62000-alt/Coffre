@@ -15,6 +15,7 @@ mais pas une garantie cryptographique d'effacement physique de la RAM."""
 from __future__ import annotations
 
 import json
+import math
 import secrets
 import string
 from pathlib import Path
@@ -222,6 +223,50 @@ class Vault:
 
         self._key = new_key
         self._entries, self.corrupted_entry_ids = self._decrypt_all_entries()
+
+
+_STRENGTH_LABELS = ("Tres faible", "Faible", "Moyen", "Fort", "Tres fort")
+_STRENGTH_SYMBOLS = "!@#$%^&*()-_=+[]{};:,.?"
+
+
+def password_strength(password: str) -> dict:
+    """Estime la solidite d'un mot de passe par entropie approximative
+    (longueur * log2(taille de l'alphabet REELLEMENT utilise)) plutot que
+    par une simple regle de longueur : "aaaaaaaaaa" (10 caracteres, un seul
+    alphabet) doit etre juge plus faible que "aB3!aB3!aB" (10 caracteres,
+    4 alphabets), meme longueur egale. Approximation volontairement simple
+    (pas de detection de motifs/dictionnaire type zxcvbn) - suffisante pour
+    guider visuellement l'utilisateur, pas pour une garantie de securite
+    formelle."""
+    if not password:
+        return {"score": 0, "label": _STRENGTH_LABELS[0], "bits": 0.0}
+
+    charset_size = 0
+    if any(c.islower() for c in password):
+        charset_size += 26
+    if any(c.isupper() for c in password):
+        charset_size += 26
+    if any(c.isdigit() for c in password):
+        charset_size += 10
+    if any(c in _STRENGTH_SYMBOLS for c in password):
+        charset_size += len(_STRENGTH_SYMBOLS)
+    other = set(password) - set(string.ascii_letters + string.digits + _STRENGTH_SYMBOLS)
+    if other:
+        charset_size += len(other)  # au moins ces caracteres precis sont possibles
+
+    bits = len(password) * math.log2(charset_size) if charset_size > 0 else 0.0
+
+    if bits < 28:
+        score = 0
+    elif bits < 36:
+        score = 1
+    elif bits < 60:
+        score = 2
+    elif bits < 80:
+        score = 3
+    else:
+        score = 4
+    return {"score": score, "label": _STRENGTH_LABELS[score], "bits": round(bits, 1)}
 
 
 def generate_password(

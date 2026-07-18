@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vault import Vault, VaultError, generate_password
+from vault import Vault, VaultError, generate_password, password_strength
 
 
 class VaultLifecycleTestCase(unittest.TestCase):
@@ -243,6 +243,37 @@ class ChangeMasterPasswordTestCase(unittest.TestCase):
         self.assertTrue(self.vault.unlock("ancien-mot-de-passe"))
         entries = self.vault.list_entries()
         self.assertEqual(entries[0]["password"], "secret123")
+
+
+class PasswordStrengthTestCase(unittest.TestCase):
+    def test_empty_password_is_very_weak(self):
+        result = password_strength("")
+        self.assertEqual(result["score"], 0)
+        self.assertEqual(result["bits"], 0.0)
+
+    def test_short_lowercase_only_password_is_weak(self):
+        result = password_strength("abc")
+        self.assertLessEqual(result["score"], 1)
+
+    def test_long_single_alphabet_password_scores_lower_than_same_length_mixed(self):
+        single_alphabet = password_strength("aaaaaaaaaa")
+        mixed = password_strength("aB3!aB3!aB")
+        self.assertLess(single_alphabet["bits"], mixed["bits"])
+
+    def test_using_more_character_categories_increases_the_score(self):
+        lower_only = password_strength("abcdefghij")
+        lower_upper_digits_symbols = password_strength("aB3!cD5@fG")
+        self.assertGreater(lower_upper_digits_symbols["score"], lower_only["score"])
+
+    def test_long_random_looking_password_is_scored_very_strong(self):
+        result = password_strength("xK9$mQ2#pL7@vN4!")
+        self.assertEqual(result["score"], 4)
+        self.assertEqual(result["label"], "Tres fort")
+
+    def test_a_generated_password_is_never_rated_very_weak(self):
+        pw = generate_password(length=20)
+        result = password_strength(pw)
+        self.assertGreaterEqual(result["score"], 2)
 
 
 class GeneratePasswordTestCase(unittest.TestCase):
