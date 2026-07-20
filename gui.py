@@ -4,13 +4,15 @@ aucun cloud, aucune synchronisation."""
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import time
 import webbrowser
+from datetime import date
 from pathlib import Path
 from tkinter import (
     BOTH, END, LEFT, RIGHT, TOP, X, Y, VERTICAL,
-    BooleanVar, IntVar, StringVar, Tk, Toplevel, ttk, messagebox,
+    BooleanVar, IntVar, StringVar, Tk, Toplevel, ttk, filedialog, messagebox,
 )
 
 from vault import Vault, VaultError, generate_password, password_strength
@@ -241,6 +243,7 @@ class CoffreApp:
         self.search_var.trace_add("write", lambda *_: self._refresh_entries())
         ttk.Button(top, text="Generateur...", command=self._open_generator_dialog).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Mots de passe reutilises...", command=self._open_reused_passwords_dialog).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top, text="Sauvegarder une copie...", command=self._backup_vault).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
         ttk.Button(top, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT, padx=(0, 10))
 
@@ -546,6 +549,33 @@ class CoffreApp:
                 ).pack(anchor="w", padx=25)
 
         ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)
+
+    # -- sauvegarde du coffre -----------------------------------------------------
+
+    def _backup_vault(self):
+        dest = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="Sauvegarder une copie du coffre",
+            defaultextension=".sqlite",
+            initialfile=f"coffre-sauvegarde-{date.today().isoformat()}.sqlite",
+            filetypes=[("Base SQLite", "*.sqlite"), ("Tous les fichiers", "*.*")],
+        )
+        if not dest:
+            return
+        try:
+            self.vault.backup_to(Path(dest))
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # sqlite3.Error en plus d'OSError : une destination inaccessible
+            # (cle USB retiree, dossier en lecture seule) remonte en
+            # OperationalError depuis sqlite3.connect, pas en OSError.
+            messagebox.showerror(APP_TITLE, f"La sauvegarde a echoue :\n{exc}")
+            return
+        messagebox.showinfo(
+            APP_TITLE,
+            f"Copie du coffre enregistree :\n{dest}\n\n"
+            "Cette copie est chiffree et reste protegee par le meme mot de "
+            "passe maitre que le coffre actuel.",
+        )
 
     # -- changement de mot de passe maitre ---------------------------------------
 

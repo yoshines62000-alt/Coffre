@@ -208,6 +208,54 @@ class EntryCrudTestCase(unittest.TestCase):
         self.assertEqual(len(groups), 2)
 
 
+class BackupTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.vault = Vault(self.tmp / "coffre.sqlite")
+        self.addCleanup(self.vault.close)
+        self.vault.create("mot-de-passe-maitre")
+        self.vault.add_entry("Site X", username="alice", password="secret123")
+        self.vault.add_entry("Site Y", username="bob", password="hunter2")
+
+    def test_the_backup_opens_as_a_full_vault_with_the_same_master_password(self):
+        dest = self.tmp / "sauvegarde.sqlite"
+        self.vault.backup_to(dest)
+
+        copy = Vault(dest)
+        self.addCleanup(copy.close)
+        self.assertTrue(copy.unlock("mot-de-passe-maitre"))
+        entries = sorted(copy.list_entries(), key=lambda e: e["title"])
+        self.assertEqual([e["title"] for e in entries], ["Site X", "Site Y"])
+        self.assertEqual(entries[0]["username"], "alice")
+        self.assertEqual(entries[0]["password"], "secret123")
+        self.assertEqual(entries[1]["password"], "hunter2")
+
+    def test_the_backup_still_rejects_a_wrong_master_password(self):
+        dest = self.tmp / "sauvegarde.sqlite"
+        self.vault.backup_to(dest)
+
+        copy = Vault(dest)
+        self.addCleanup(copy.close)
+        self.assertFalse(copy.unlock("mauvais-mot-de-passe"))
+
+    def test_backup_works_while_the_vault_is_locked(self):
+        # La sauvegarde copie le fichier chiffre tel quel, sans rien
+        # dechiffrer : elle ne doit donc pas exiger le deverrouillage
+        # (contrairement a toutes les autres operations du coffre).
+        self.vault.lock()
+        dest = self.tmp / "sauvegarde.sqlite"
+        self.vault.backup_to(dest)
+
+        copy = Vault(dest)
+        self.addCleanup(copy.close)
+        self.assertTrue(copy.unlock("mot-de-passe-maitre"))
+        self.assertEqual(len(copy.list_entries()), 2)
+
+    def test_backup_onto_the_live_vault_file_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.vault.backup_to(self.vault.db.path)
+
+
 class ChangeMasterPasswordTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

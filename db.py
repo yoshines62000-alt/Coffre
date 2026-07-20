@@ -32,6 +32,24 @@ class Database:
     def close(self) -> None:
         self.conn.close()
 
+    def backup_to(self, dest_path: Path) -> None:
+        """Copie la base entiere vers `dest_path` via l'API de sauvegarde
+        native de sqlite3, qui garantit une copie coherente meme si des
+        ecritures sont en cours - contrairement a une copie brute du
+        fichier, qui pourrait capturer un etat intermediaire invalide.
+        Refuse la base active comme destination : sqlite s'ecraserait
+        lui-meme (la comparaison passe par resolve() pour que deux
+        ecritures differentes du meme chemin ne contournent pas ce
+        garde-fou)."""
+        dest_path = Path(dest_path)
+        if dest_path.resolve() == self.path.resolve():
+            raise ValueError("La destination ne peut pas etre le fichier du coffre en cours d'utilisation.")
+        dest_conn = sqlite3.connect(str(dest_path))
+        try:
+            self.conn.backup(dest_conn)
+        finally:
+            dest_conn.close()
+
     def _create_schema(self) -> None:
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS vault_meta (

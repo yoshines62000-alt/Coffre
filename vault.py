@@ -190,6 +190,19 @@ class Vault:
             groups.setdefault(password, []).append(entry)
         return [entries for entries in groups.values() if len(entries) > 1]
 
+    # -- sauvegarde -------------------------------------------------------------
+
+    def backup_to(self, dest_path: Path) -> None:
+        """Sauvegarde une copie du fichier du coffre vers `dest_path`.
+
+        Fonctionne aussi bien coffre VERROUILLE que deverrouille : le
+        fichier est chiffre au repos, la copie est donc chiffree a
+        l'identique - aucun dechiffrement (et donc aucun deverrouillage)
+        n'est necessaire, et la copie reste protegee par le meme mot de
+        passe maitre que l'original. C'est la seule operation du coffre
+        volontairement exemptee de _require_unlocked."""
+        self.db.backup_to(dest_path)
+
     # -- mot de passe maitre ----------------------------------------------------
 
     def change_master_password(self, current_password: str, new_password: str) -> None:

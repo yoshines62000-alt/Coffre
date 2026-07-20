@@ -133,6 +133,41 @@ class EntriesTestCase(unittest.TestCase):
         self.assertEqual(meta["kdf_salt"], b"ancien-sel")
         self.assertEqual(meta["verifier_nonce"], b"ancien-nonce")
 
+    def test_backup_to_copies_meta_and_entries_unchanged(self):
+        self.db.set_vault_meta(b"sel", b"nonce-meta", b"cipher-meta")
+        entry_id = self.db.add_entry(b"nonce", b"cipher")
+        dest = self.tmp / "copie.sqlite"
+        self.db.backup_to(dest)
+
+        copy = Database(dest)
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.get_vault_meta()["kdf_salt"], b"sel")
+        self.assertEqual(copy.get_entry(entry_id)["ciphertext"], b"cipher")
+
+    def test_the_backup_is_independent_of_later_changes_to_the_original(self):
+        # Verifie que backup_to produit une vraie copie figee au moment de
+        # la sauvegarde, pas une vue partagee sur le meme fichier.
+        entry_id = self.db.add_entry(b"nonce", b"cipher-original")
+        dest = self.tmp / "copie.sqlite"
+        self.db.backup_to(dest)
+        self.db.update_entry(entry_id, b"nonce2", b"cipher-modifie")
+
+        copy = Database(dest)
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.get_entry(entry_id)["ciphertext"], b"cipher-original")
+
+    def test_backup_to_the_live_database_path_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            self.db.backup_to(self.db.path)
+
+    def test_backup_to_the_live_path_spelled_differently_still_raises(self):
+        # Le garde-fou compare les chemins RESOLUS : un chemin equivalent
+        # mais ecrit autrement (composant "..") ne doit pas permettre a
+        # sqlite d'ecraser la base active.
+        alias = self.tmp / ".." / self.tmp.name / "test.sqlite"
+        with self.assertRaises(ValueError):
+            self.db.backup_to(alias)
+
     def test_data_persists_after_closing_and_reopening_the_database_file(self):
         entry_id = self.db.add_entry(b"nonce", b"cipher-persistant")
         self.db.set_vault_meta(b"sel-persistant", b"nonce-meta", b"cipher-meta")
