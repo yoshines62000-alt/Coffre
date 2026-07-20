@@ -243,6 +243,7 @@ class CoffreApp:
         self.search_var.trace_add("write", lambda *_: self._refresh_entries())
         ttk.Button(top, text="Generateur...", command=self._open_generator_dialog).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Mots de passe reutilises...", command=self._open_reused_passwords_dialog).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top, text="Mots de passe faibles...", command=self._open_weak_passwords_dialog).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Sauvegarder une copie...", command=self._backup_vault).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
         ttk.Button(top, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT, padx=(0, 10))
@@ -546,6 +547,37 @@ class CoffreApp:
                 ttk.Label(
                     dialog, text=f"- {titles}", foreground="black", font=BODY_FONT,
                     wraplength=380, justify="left",
+                ).pack(anchor="w", padx=25)
+
+        ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)
+
+    def _open_weak_passwords_dialog(self):
+        weak = self.vault.find_weak_passwords()
+
+        dialog = Toplevel(self.root)
+        self._open_dialogs.append(dialog)
+        dialog.title("Mots de passe faibles")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        if not weak:
+            ttk.Label(
+                dialog, text="Aucun mot de passe faible detecte.",
+                foreground="black", font=BODY_FONT,
+            ).pack(padx=15, pady=15)
+        else:
+            plural = "s" if len(weak) > 1 else ""
+            ttk.Label(
+                dialog,
+                text=f"{len(weak)} mot{plural} de passe juge{plural} faible ou tres faible "
+                "(le mot de passe lui-meme n'est jamais affiche ici) :",
+                foreground="black", font=BODY_FONT, wraplength=380, justify="left",
+            ).pack(anchor="w", padx=15, pady=(15, 5))
+            for entry in weak:
+                ttk.Label(
+                    dialog, text=f"- {entry['title']} - Solidite : {entry['label']}",
+                    foreground="black", font=BODY_FONT, wraplength=380, justify="left",
                 ).pack(anchor="w", padx=25)
 
         ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)

@@ -207,6 +207,42 @@ class EntryCrudTestCase(unittest.TestCase):
         groups = self.vault.find_reused_passwords()
         self.assertEqual(len(groups), 2)
 
+    def test_find_weak_passwords_detects_a_weak_entry(self):
+        entry_id = self.vault.add_entry("Site faible", password="aaaa")
+        weak = self.vault.find_weak_passwords()
+        self.assertEqual(len(weak), 1)
+        self.assertEqual(weak[0]["id"], entry_id)
+        self.assertEqual(weak[0]["title"], "Site faible")
+
+    def test_find_weak_passwords_never_includes_the_password_itself(self):
+        self.vault.add_entry("Site faible", password="aaaa")
+        weak = self.vault.find_weak_passwords()
+        self.assertNotIn("password", weak[0])
+        self.assertNotIn("aaaa", repr(weak))
+
+    def test_find_weak_passwords_ignores_a_generated_password(self):
+        strong = generate_password(length=20)
+        self.vault.add_entry("Site fort", password=strong)
+        self.assertEqual(self.vault.find_weak_passwords(), [])
+
+    def test_find_weak_passwords_ignores_empty_passwords(self):
+        self.vault.add_entry("Site sans mot de passe", password="")
+        self.assertEqual(self.vault.find_weak_passwords(), [])
+
+    def test_find_weak_passwords_respects_a_stricter_threshold(self):
+        # Un mot de passe "Moyen" (score 2) n'est pas signale au seuil par
+        # defaut (max_score=1), mais l'est avec un seuil plus strict.
+        self.vault.add_entry("Site moyen", password="abcdefghij")
+        self.assertEqual(self.vault.find_weak_passwords(), [])
+        weak_strict = self.vault.find_weak_passwords(max_score=2)
+        self.assertEqual(len(weak_strict), 1)
+
+    def test_find_weak_passwords_on_a_locked_vault_raises(self):
+        self.vault.add_entry("Site faible", password="aaaa")
+        self.vault.lock()
+        with self.assertRaises(VaultError):
+            self.vault.find_weak_passwords()
+
 
 class BackupTestCase(unittest.TestCase):
     def setUp(self):

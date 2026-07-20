@@ -190,6 +190,28 @@ class Vault:
             groups.setdefault(password, []).append(entry)
         return [entries for entries in groups.values() if len(entries) > 1]
 
+    def find_weak_passwords(self, max_score: int = 1) -> list:
+        """Liste les entrees dont le mot de passe est juge faible (score
+        d'entropie <= max_score, voir password_strength). Complement direct
+        de find_reused_passwords : meme contrat de confidentialite (le mot
+        de passe n'apparait JAMAIS dans le resultat, ni sa valeur ni son
+        estimation en bits, seulement le libelle qualitatif du niveau) et
+        meme exclusion des mots de passe vides (un champ vide n'est pas un
+        "mot de passe faible", juste une absence de valeur)."""
+        self._require_unlocked()
+        weak = []
+        for entry in self._entries:
+            password = entry.get("password", "")
+            if not password:
+                continue
+            strength = password_strength(password)
+            if strength["score"] <= max_score:
+                weak.append({
+                    "id": entry["id"], "title": entry["title"], "username": entry.get("username", ""),
+                    "label": strength["label"],
+                })
+        return weak
+
     # -- sauvegarde -------------------------------------------------------------
 
     def backup_to(self, dest_path: Path) -> None:
