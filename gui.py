@@ -4,6 +4,7 @@ aucun cloud, aucune synchronisation."""
 
 from __future__ import annotations
 
+import queue
 import sqlite3
 import sys
 import time
@@ -15,10 +16,14 @@ from tkinter import (
     BooleanVar, IntVar, StringVar, TclError, Tk, Toplevel, ttk, filedialog, messagebox,
 )
 
+import update_checker
 from vault import Vault, VaultError, generate_password, password_strength
 
 APP_TITLE = "Coffre"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
+APP_VERSION = "1.0.4"
+UPDATE_REPO = "yoshines62000-alt/Coffre"
+RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 AUTO_LOCK_SECONDS = 300
 # Delai (en secondes) avant le verrouillage automatique pendant lequel une
 # banniere d'avertissement non-bloquante est affichee dans l'ecran du coffre
@@ -110,9 +115,17 @@ class CoffreApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        self.update_status_var = StringVar(value="")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
+
+        self._update_check_queue = queue.Queue()
+        update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
+        self.root.after(500, self._poll_update_check)
 
         self.container = ttk.Frame(self.root)
         self.container.pack(fill=BOTH, expand=True)
@@ -125,6 +138,22 @@ class CoffreApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._show_unlock_screen()
+
+    def _poll_update_check(self):
+        try:
+            status, tag = self._update_check_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(500, self._poll_update_check)
+            return
+        if status == "update_available":
+            self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
+            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
+        elif status == "up_to_date":
+            self.update_status_var.set("A jour")
+            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+        # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
+        # revendique rien plutot que d'afficher a tort "a jour".
 
     # -- ecran de creation / deverrouillage -------------------------------------
     #
