@@ -3,6 +3,7 @@ verrouillage, CRUD des entrees, changement de mot de passe maitre,
 generateur de mot de passe) - sur une vraie base SQLite temporaire et de
 vraies operations cryptographiques (aucun mock de crypto.py)."""
 
+import os
 import string
 import sys
 import tempfile
@@ -207,6 +208,20 @@ class EntryCrudTestCase(unittest.TestCase):
         groups = self.vault.find_reused_passwords()
         self.assertEqual(len(groups), 2)
 
+    def test_find_reused_passwords_never_includes_the_password_itself(self):
+        # Regression trouvee a l'audit : find_reused_passwords renvoyait
+        # auparavant les entrees BRUTES de self._entries (avec le mot de
+        # passe en clair), contredisant le contrat de confidentialite que
+        # find_weak_passwords pretend partager avec elle. Chaque entree du
+        # resultat doit desormais se limiter a {id, title, username}.
+        self.vault.add_entry("Site A", username="alice", password="partage123")
+        self.vault.add_entry("Site B", username="bob", password="partage123")
+        groups = self.vault.find_reused_passwords()
+        for entry in groups[0]:
+            self.assertNotIn("password", entry)
+            self.assertEqual(set(entry.keys()), {"id", "title", "username"})
+        self.assertNotIn("partage123", repr(groups))
+
     def test_find_weak_passwords_detects_a_weak_entry(self):
         entry_id = self.vault.add_entry("Site faible", password="aaaa")
         weak = self.vault.find_weak_passwords()
@@ -290,6 +305,18 @@ class BackupTestCase(unittest.TestCase):
     def test_backup_onto_the_live_vault_file_raises_value_error(self):
         with self.assertRaises(ValueError):
             self.vault.backup_to(self.vault.db.path)
+
+    def test_backup_onto_a_hard_link_of_the_live_vault_file_raises_value_error(self):
+        # Regression trouvee a l'audit : resolve() ne detecte jamais un
+        # lien physique (hard link) vers le meme fichier, puisqu'un lien
+        # physique n'est pas un point de reparse a suivre - sans la
+        # verification d'identite via os.path.samefile, sqlite3 tentait
+        # d'ouvrir une seconde connexion vers le meme fichier physique deja
+        # ouvert par self.conn et restait bloque indefiniment.
+        hardlink = self.vault.db.path.parent / "hardlink.sqlite"
+        os.link(self.vault.db.path, hardlink)
+        with self.assertRaises(ValueError):
+            self.vault.backup_to(hardlink)
 
 
 class ChangeMasterPasswordTestCase(unittest.TestCase):

@@ -185,6 +185,14 @@ class CoffreApp:
                 self._unlock_password_var.set("")
 
         ttk.Button(frame, text="Deverrouiller", command=on_unlock).pack()
+        # Vault.backup_to fonctionne deja coffre verrouille (le fichier est
+        # chiffre au repos, aucun dechiffrement n'est necessaire) et c'est
+        # meme teste (test_backup_works_while_the_vault_is_locked) - mais
+        # le seul bouton "Sauvegarder une copie..." vivait jusqu'ici dans
+        # l'ecran POST-deverrouillage, rendant cette capacite pourtant
+        # annoncee ("en un clic, y compris coffre verrouille") inatteignable
+        # depuis l'ecran de deverrouillage (bug trouve a l'audit).
+        ttk.Button(frame, text="Sauvegarder une copie...", command=self._backup_vault).pack(pady=(10, 0))
         self._focus_unlock_entry = entry
         entry.bind("<Return>", lambda event: on_unlock())
         return frame

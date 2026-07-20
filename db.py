@@ -8,6 +8,7 @@ Le dechiffrement/chiffrement est entierement la responsabilite de vault.py.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,12 +39,24 @@ class Database:
         ecritures sont en cours - contrairement a une copie brute du
         fichier, qui pourrait capturer un etat intermediaire invalide.
         Refuse la base active comme destination : sqlite s'ecraserait
-        lui-meme (la comparaison passe par resolve() pour que deux
-        ecritures differentes du meme chemin ne contournent pas ce
-        garde-fou)."""
+        lui-meme. Deux verifications : les chemins RESOLUS (pour qu'un
+        alias comme "..\\coffre.sqlite" ne contourne pas ce garde-fou) ET,
+        si la destination existe deja, l'identite de fichier via
+        os.path.samefile (pour attraper un LIEN PHYSIQUE - hard link - vers
+        le meme fichier ; bug trouve a l'audit : resolve() ne le detecte
+        jamais, puisqu'un lien physique n'est pas un point de reparse a
+        suivre, et sans cette verification sqlite3 restait bloque
+        indefiniment a tenter d'ouvrir une seconde connexion vers le meme
+        fichier physique)."""
         dest_path = Path(dest_path)
         if dest_path.resolve() == self.path.resolve():
             raise ValueError("La destination ne peut pas etre le fichier du coffre en cours d'utilisation.")
+        if dest_path.exists():
+            try:
+                if os.path.samefile(dest_path, self.path):
+                    raise ValueError("La destination ne peut pas etre le fichier du coffre en cours d'utilisation.")
+            except OSError:
+                pass  # comparaison impossible (permissions...) : on laisse la suite echouer normalement
         dest_conn = sqlite3.connect(str(dest_path))
         try:
             self.conn.backup(dest_conn)

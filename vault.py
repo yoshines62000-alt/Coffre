@@ -177,10 +177,17 @@ class Vault:
         Ne renvoie que les groupes de 2 entrees ou plus - une entree seule
         n'est jamais un "mot de passe reutilise". Les entrees sans mot de
         passe (champ vide) sont ignorees : un champ vide n'est pas un
-        secret partage, juste une absence de valeur. Le mot de passe
-        lui-meme n'est jamais renvoye ici (seulement les entrees qui le
-        partagent) - cette fonction sert a alerter, pas a afficher les
-        secrets en clair dans un rapport."""
+        secret partage, juste une absence de valeur.
+
+        Chaque entree du resultat est un dict {id, title, username} - PAS
+        l'entree brute de self._entries, qui contient le mot de passe en
+        clair. Avant correction (audit), cette fonction renvoyait les
+        entrees brutes : ca ne fuitait rien dans l'UI actuelle (qui ne lit
+        que "title"), mais c'etait une bombe a retardement pour tout futur
+        appelant (export JSON, log de debogage...) et contredisait le
+        contrat annonce par find_weak_passwords ("meme contrat de
+        confidentialite que find_reused_passwords" - qui n'etait donc pas
+        tout a fait vrai avant ce correctif)."""
         self._require_unlocked()
         groups: dict = {}
         for entry in self._entries:
@@ -188,7 +195,10 @@ class Vault:
             if not password:
                 continue
             groups.setdefault(password, []).append(entry)
-        return [entries for entries in groups.values() if len(entries) > 1]
+        return [
+            [{"id": e["id"], "title": e["title"], "username": e.get("username", "")} for e in entries]
+            for entries in groups.values() if len(entries) > 1
+        ]
 
     def find_weak_passwords(self, max_score: int = 1) -> list:
         """Liste les entrees dont le mot de passe est juge faible (score
