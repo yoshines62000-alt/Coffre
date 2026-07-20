@@ -12,7 +12,7 @@ from datetime import date
 from pathlib import Path
 from tkinter import (
     BOTH, END, LEFT, RIGHT, TOP, X, Y, VERTICAL,
-    BooleanVar, IntVar, StringVar, Tk, Toplevel, ttk, filedialog, messagebox,
+    BooleanVar, IntVar, StringVar, TclError, Tk, Toplevel, ttk, filedialog, messagebox,
 )
 
 from vault import Vault, VaultError, generate_password, password_strength
@@ -20,6 +20,11 @@ from vault import Vault, VaultError, generate_password, password_strength
 APP_TITLE = "Coffre"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
 AUTO_LOCK_SECONDS = 300
+# Delai (en secondes) avant le verrouillage automatique pendant lequel une
+# banniere d'avertissement non-bloquante est affichee dans l'ecran du coffre
+# - purement informatif, ne retarde ni n'affaiblit en rien le verrouillage
+# reel qui reste declenche par _check_auto_lock au bout de AUTO_LOCK_SECONDS.
+AUTO_LOCK_WARNING_SECONDS = 30
 CLIPBOARD_CLEAR_SECONDS = 20
 
 # Police explicite pour tout label de texte normal (noir). Constate a la
@@ -44,6 +49,17 @@ def _resource_path(relative: str) -> Path:
 
 def _data_dir() -> Path:
     return Path.home() / "AppData" / "Roaming" / "Coffre"
+
+
+def _is_valid_length_input(value: str) -> bool:
+    """validatecommand (validate="key") du Spinbox de longueur du
+    generateur : n'autorise que des chiffres, plus la chaine vide (le temps
+    d'une saisie en cours, ex. apres un Ctrl+A puis Suppr). Empeche a la
+    racine la saisie de texte libre (lettres, symboles) qui ferait sinon
+    lever tkinter.TclError plus tard sur length_var.get() - voir aussi le
+    filet de securite dans do_generate pour les cas non couverts par cette
+    seule validation (ex. champ laisse vide)."""
+    return value == "" or value.isdigit()
 
 
 class CoffreApp:
@@ -256,8 +272,19 @@ class CoffreApp:
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
         ttk.Button(top, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT, padx=(0, 10))
 
+        # Banniere d'avertissement avant verrouillage automatique par
+        # inactivite - non affichee par defaut (pack_forget), voir
+        # _check_auto_lock/_show_auto_lock_warning/_hide_auto_lock_warning.
+        # Purement informative : le verrouillage reel a AUTO_LOCK_SECONDS
+        # n'en depend pas et se produit inconditionnellement.
+        self._auto_lock_warning_var = StringVar()
+        self._auto_lock_warning_label = ttk.Label(
+            frame, textvariable=self._auto_lock_warning_var, foreground="#B00020", font=BODY_FONT,
+        )
+
         body = ttk.Frame(frame)
         body.pack(fill=BOTH, expand=True, padx=10, pady=(0, 5))
+        self._vault_body_frame = body
 
         columns = ("title", "username", "url")
         self.entries_tree = ttk.Treeview(body, columns=columns, show="headings", height=18)
@@ -481,7 +508,15 @@ class CoffreApp:
         result_var = StringVar()
 
         ttk.Label(dialog, text="Longueur", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
-        ttk.Spinbox(dialog, from_=4, to=128, textvariable=length_var, width=6).grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
+        # validate="key" + validatecommand : empeche la saisie clavier de
+        # texte libre (le Spinbox reste sinon editable comme un Entry
+        # ordinaire, from_/to n'etant appliques qu'aux fleches). Voir
+        # _is_valid_length_input et le filet de securite dans do_generate.
+        length_vcmd = (dialog.register(_is_valid_length_input), "%P")
+        ttk.Spinbox(
+            dialog, from_=4, to=128, textvariable=length_var, width=6,
+            validate="key", validatecommand=length_vcmd,
+        ).grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
 
         ttk.Checkbutton(dialog, text="Majuscules (A-Z)", variable=use_upper).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
         ttk.Checkbutton(dialog, text="Minuscules (a-z)", variable=use_lower).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
@@ -494,8 +529,22 @@ class CoffreApp:
 
         def do_generate():
             try:
+                length = length_var.get()
+            except TclError:
+                # length_var (IntVar) ne peut pas etre convertie en entier -
+                # champ laisse vide, ou (avant le validatecommand ci-dessus,
+                # ou sur un cas qu'il ne couvrirait pas) texte non numerique
+                # saisi au clavier. Sans ce filet, la TclError remontait hors
+                # du callback du bouton "Regenerer" : dans l'executable
+                # package (sans console), Tkinter l'avale silencieusement et
+                # le bouton semble ne rien faire, sans aucun message.
+                messagebox.showwarning(
+                    APP_TITLE, "La longueur doit etre un nombre entier (entre 4 et 128).", parent=dialog,
+                )
+                return
+            try:
                 result_var.set(generate_password(
-                    length=length_var.get(), use_upper=use_upper.get(), use_lower=use_lower.get(),
+                    length=length, use_upper=use_upper.get(), use_lower=use_lower.get(),
                     use_digits=use_digits.get(), use_symbols=use_symbols.get(), avoid_ambiguous=avoid_ambiguous.get(),
                 ))
             except VaultError as exc:
@@ -527,6 +576,23 @@ class CoffreApp:
 
     # -- mots de passe reutilises -------------------------------------------------
 
+    def _open_entry_from_listing_dialog(self, dialog, entry_id):
+        """Ferme un dialogue de listing (mots de passe reutilises/faibles) et
+        ouvre directement l'entree correspondante en edition - sans ca,
+        l'utilisateur devait fermer le dialogue, retrouver l'entree a la
+        main dans la liste principale puis double-cliquer dessus, alors que
+        ces listings sont justement l'endroit ou il veut agir."""
+        dialog.destroy()
+        self._open_entry_dialog(entry_id)
+
+    def _make_clickable_entry_label(self, parent, text, entry_id):
+        label = ttk.Label(
+            parent, text=text, foreground="#0645AD", cursor="hand2", font=BODY_FONT,
+            wraplength=380, justify="left",
+        )
+        label.bind("<Button-1>", lambda event, eid=entry_id: self._open_entry_from_listing_dialog(parent.winfo_toplevel(), eid))
+        return label
+
     def _open_reused_passwords_dialog(self):
         groups = self.vault.find_reused_passwords()
 
@@ -547,15 +613,15 @@ class CoffreApp:
             ttk.Label(
                 dialog,
                 text=f"{len(groups)} mot{plural} de passe partage{plural} entre plusieurs entrees "
-                "(le mot de passe lui-meme n'est jamais affiche ici) :",
+                "(le mot de passe lui-meme n'est jamais affiche ici) - cliquez sur une entree "
+                "pour l'ouvrir en edition :",
                 foreground="black", font=BODY_FONT, wraplength=380, justify="left",
             ).pack(anchor="w", padx=15, pady=(15, 5))
-            for entries in groups:
-                titles = ", ".join(sorted(e["title"] for e in entries))
-                ttk.Label(
-                    dialog, text=f"- {titles}", foreground="black", font=BODY_FONT,
-                    wraplength=380, justify="left",
-                ).pack(anchor="w", padx=25)
+            for group_index, entries in enumerate(groups):
+                for entry in sorted(entries, key=lambda e: e["title"].lower()):
+                    self._make_clickable_entry_label(dialog, f"- {entry['title']}", entry["id"]).pack(anchor="w", padx=25)
+                if group_index < len(groups) - 1:
+                    ttk.Separator(dialog, orient="horizontal").pack(fill=X, padx=15, pady=4)
 
         ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)
 
@@ -579,13 +645,13 @@ class CoffreApp:
             ttk.Label(
                 dialog,
                 text=f"{len(weak)} mot{plural} de passe juge{plural} faible ou tres faible "
-                "(le mot de passe lui-meme n'est jamais affiche ici) :",
+                "(le mot de passe lui-meme n'est jamais affiche ici) - cliquez sur une entree "
+                "pour l'ouvrir en edition :",
                 foreground="black", font=BODY_FONT, wraplength=380, justify="left",
             ).pack(anchor="w", padx=15, pady=(15, 5))
             for entry in weak:
-                ttk.Label(
-                    dialog, text=f"- {entry['title']} - Solidite : {entry['label']}",
-                    foreground="black", font=BODY_FONT, wraplength=380, justify="left",
+                self._make_clickable_entry_label(
+                    dialog, f"- {entry['title']} - Solidite : {entry['label']}", entry["id"],
                 ).pack(anchor="w", padx=25)
 
         ttk.Button(dialog, text="Fermer", command=dialog.destroy).pack(pady=15)
@@ -666,10 +732,39 @@ class CoffreApp:
     def _check_auto_lock(self):
         if not self.vault.is_unlocked:
             return
-        if time.monotonic() - self._last_activity >= AUTO_LOCK_SECONDS:
+        remaining = AUTO_LOCK_SECONDS - (time.monotonic() - self._last_activity)
+        if remaining <= 0:
+            # Le verrouillage reel : inconditionnel, independant de la
+            # banniere d'avertissement ci-dessous (purement informative).
+            self._hide_auto_lock_warning()
             self._lock_vault()
             return
+        if remaining <= AUTO_LOCK_WARNING_SECONDS:
+            self._show_auto_lock_warning(remaining)
+        else:
+            self._hide_auto_lock_warning()
         self._auto_lock_job = self.root.after(1000, self._check_auto_lock)
+
+    def _show_auto_lock_warning(self, remaining_seconds):
+        # Avertissement non-bloquant (simple banniere, pas de messagebox
+        # qui interromprait l'utilisateur ni ne retarderait le compte a
+        # rebours) affiche dans les derniere secondes avant le
+        # verrouillage automatique - disparait de lui-meme (voir
+        # _hide_auto_lock_warning) des que _check_auto_lock constate qu'une
+        # activite a repousse l'echeance de plus de AUTO_LOCK_WARNING_SECONDS.
+        if not hasattr(self, "_auto_lock_warning_label") or not self._auto_lock_warning_label.winfo_exists():
+            return
+        seconds = max(1, round(remaining_seconds))
+        plural = "s" if seconds > 1 else ""
+        self._auto_lock_warning_var.set(
+            f"Le coffre va se verrouiller automatiquement dans {seconds} seconde{plural} par inactivite."
+        )
+        if not self._auto_lock_warning_label.winfo_ismapped():
+            self._auto_lock_warning_label.pack(anchor="w", padx=10, pady=(0, 6), before=self._vault_body_frame)
+
+    def _hide_auto_lock_warning(self):
+        if hasattr(self, "_auto_lock_warning_label") and self._auto_lock_warning_label.winfo_exists():
+            self._auto_lock_warning_label.pack_forget()
 
     def _close_all_dialogs(self):
         """Detruit de force tout Toplevel encore ouvert (edition, generateur,
