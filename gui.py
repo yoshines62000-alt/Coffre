@@ -72,7 +72,15 @@ class CoffreApp:
         self.root = root
         self.root.title(APP_TITLE)
         self.root.geometry("900x580")
-        self.root.minsize(700, 450)
+        # 750px : la rangee du bas de la toolbar (Generateur/Mots de passe
+        # reutilises/Mots de passe faibles/Sauvegarder/Changer le mot de
+        # passe maitre) demande environ 711px une fois la fenetre
+        # entierement rendue, plus le padding horizontal (10px de chaque
+        # cote) de sa frame - verifie empiriquement. 700px (l'ancienne
+        # valeur) la faisait deja legerement deborder au redimensionnement
+        # minimal, exactement le probleme signale a l'audit pour la rangee
+        # unique d'origine (1132px). 750px laisse une marge de securite.
+        self.root.minsize(750, 450)
 
         # "alt" est un theme entierement rendu par Tk (jamais delegue a
         # l'API de theming Windows), visuellement tres proche du rendu
@@ -287,19 +295,38 @@ class CoffreApp:
     def _build_vault_screen(self):
         frame = self.vault_frame
 
+        # Repartie sur deux rangees : a 900px de large (taille par defaut de
+        # la fenetre), les six boutons plus le champ de recherche tenaient
+        # tous sur une seule rangee "top" packee en LEFT/RIGHT, mais leur
+        # largeur requise cumulee (mesuree a l'audit via winfo_reqwidth())
+        # depassait la largeur reelle de la fenetre de 232px (26%) : les
+        # boutons packes a droite (RIGHT) sortaient simplement du cadre
+        # visible sans aucune scrollbar ni indication - "Verrouiller
+        # maintenant" tronque, "Changer le mot de passe maitre..." (une
+        # fonctionnalite de securite) totalement invisible. Aggrave encore
+        # par minsize(700, 450) en cas de redimensionnement vers le bas.
+        # Rechercher/Verrouiller restent sur la rangee du haut (toujours
+        # visibles en premier), les actions secondaires sur la rangee du
+        # bas - la somme des largeurs par rangee reste sous la largeur
+        # minimale de la fenetre, verifie empiriquement via un smoke test
+        # mesurant top.winfo_reqwidth()/top2.winfo_reqwidth() contre
+        # root.winfo_width().
         top = ttk.Frame(frame)
-        top.pack(fill=X, padx=10, pady=10)
+        top.pack(fill=X, padx=10, pady=(10, 0))
         ttk.Label(top, text="Rechercher :", foreground="black", font=BODY_FONT).pack(side=LEFT)
         self.search_var = StringVar()
         search_entry = ttk.Entry(top, textvariable=self.search_var, width=30)
         search_entry.pack(side=LEFT, padx=5)
         self.search_var.trace_add("write", lambda *_: self._refresh_entries())
-        ttk.Button(top, text="Generateur...", command=self._open_generator_dialog).pack(side=LEFT, padx=(10, 0))
-        ttk.Button(top, text="Mots de passe reutilises...", command=self._open_reused_passwords_dialog).pack(side=LEFT, padx=(10, 0))
-        ttk.Button(top, text="Mots de passe faibles...", command=self._open_weak_passwords_dialog).pack(side=LEFT, padx=(10, 0))
-        ttk.Button(top, text="Sauvegarder une copie...", command=self._backup_vault).pack(side=LEFT, padx=(10, 0))
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
-        ttk.Button(top, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT, padx=(0, 10))
+
+        top2 = ttk.Frame(frame)
+        top2.pack(fill=X, padx=10, pady=(6, 10))
+        ttk.Button(top2, text="Generateur...", command=self._open_generator_dialog).pack(side=LEFT)
+        ttk.Button(top2, text="Mots de passe reutilises...", command=self._open_reused_passwords_dialog).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top2, text="Mots de passe faibles...", command=self._open_weak_passwords_dialog).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top2, text="Sauvegarder une copie...", command=self._backup_vault).pack(side=LEFT, padx=(10, 0))
+        ttk.Button(top2, text="Changer le mot de passe maitre...", command=self._open_change_password_dialog).pack(side=RIGHT)
 
         # Banniere d'avertissement avant verrouillage automatique par
         # inactivite - non affichee par defaut (pack_forget), voir
@@ -466,6 +493,14 @@ class CoffreApp:
             except VaultError as exc:
                 messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
                 return
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                # sqlite3.Error/OSError en plus de VaultError : un echec
+                # d'ecriture disque (disque plein, erreur SQLite) remontait
+                # ici totalement non intercepte - invisible dans l'exe
+                # package sans console (console=False), l'utilisateur
+                # voyait juste le bouton "Enregistrer" ne rien faire.
+                messagebox.showerror(APP_TITLE, f"L'enregistrement a echoue :\n{exc}", parent=dialog)
+                return
             dialog.destroy()
             self._refresh_entries()
 
@@ -486,7 +521,16 @@ class CoffreApp:
             return
         if not messagebox.askyesno(APP_TITLE, f"Supprimer l'entree '{entry['title']}' ?"):
             return
-        self.vault.delete_entry(entry_id)
+        try:
+            self.vault.delete_entry(entry_id)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            # Meme filet que sur on_save/_backup_vault : sans lui, un echec
+            # d'ecriture disque remontait ici totalement non intercepte
+            # (aucune gestion d'exception n'entourait _delete_selected_entry
+            # avant ce correctif), et le bouton "Supprimer" ne faisait
+            # simplement rien de visible.
+            messagebox.showerror(APP_TITLE, f"La suppression a echoue :\n{exc}")
+            return
         self._refresh_entries()
 
     # -- copie presse-papier avec effacement automatique -------------------------

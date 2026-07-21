@@ -17,6 +17,7 @@ trouves a l'audit :
    AUTO_LOCK_WARNING_SECONDS dernieres secondes avant le verrouillage
    automatique par inactivite, sans jamais retarder ce verrouillage."""
 
+import sqlite3
 import sys
 import tempfile
 import time
@@ -322,6 +323,132 @@ class AutoLockWarningTestCase(GuiTestCase):
         self.app._check_auto_lock()
         self.root.update()
         self.assertFalse(dialog.winfo_exists(), "le verrouillage reel doit fermer de force les dialogues ouverts")
+
+
+class ToolbarLayoutTestCase(GuiTestCase):
+    """Correctif audit Phase 1 (item 1) : a la taille par defaut de la
+    fenetre (900x580, fixee dans CoffreApp.__init__), la toolbar du haut
+    demandait 1132px de large (mesure reelle a l'audit via
+    top.winfo_reqwidth()) contre 900px disponibles - un depassement de
+    232px (26%) qui faisait sortir "Verrouiller maintenant" (tronque) et
+    "Changer le mot de passe maitre..." (totalement invisible) du cadre
+    visible, sans scrollbar ni indication. La toolbar est desormais
+    repartie sur deux rangees ; chacune doit tenir dans la largeur par
+    defaut de la fenetre, et tous les boutons doivent rester geres par le
+    gestionnaire de geometrie (donc effectivement affiches)."""
+
+    ALL_TOOLBAR_BUTTONS = [
+        "Generateur...",
+        "Mots de passe reutilises...",
+        "Mots de passe faibles...",
+        "Sauvegarder une copie...",
+        "Verrouiller maintenant",
+        "Changer le mot de passe maitre...",
+    ]
+
+    def test_every_toolbar_button_is_present_and_packed(self):
+        self.root.update_idletasks()
+        for text in self.ALL_TOOLBAR_BUTTONS:
+            button = _find_button(self.app.vault_frame, text)
+            self.assertIsNotNone(button, f"bouton introuvable : {text}")
+            self.assertEqual(button.winfo_manager(), "pack", f"bouton non affiche : {text}")
+
+    def test_each_toolbar_row_fits_within_the_default_window_width(self):
+        self.root.update_idletasks()
+        default_width = 900  # gui.CoffreApp.__init__ : self.root.geometry("900x580")
+
+        lock_button = _find_button(self.app.vault_frame, "Verrouiller maintenant")
+        change_password_button = _find_button(self.app.vault_frame, "Changer le mot de passe maitre...")
+        top_row = lock_button.master
+        bottom_row = change_password_button.master
+        self.assertIsNot(top_row, bottom_row, "les actions secondaires doivent etre sur une rangee separee")
+
+        top_row_width = top_row.winfo_reqwidth()
+        bottom_row_width = bottom_row.winfo_reqwidth()
+        self.assertLessEqual(
+            top_row_width, default_width,
+            f"rangee du haut trop large ({top_row_width}px) pour la fenetre par defaut ({default_width}px)",
+        )
+        self.assertLessEqual(
+            bottom_row_width, default_width,
+            f"rangee du bas trop large ({bottom_row_width}px) pour la fenetre par defaut ({default_width}px)",
+        )
+
+    def test_verrouiller_maintenant_is_not_visually_truncated(self):
+        # Avant correctif, ce bouton s'affichait tronque en "Verrouiller n"
+        # car il sortait partiellement du cadre visible de la fenetre.
+        self.root.update_idletasks()
+        button = _find_button(self.app.vault_frame, "Verrouiller maintenant")
+        self.assertEqual(button.cget("text"), "Verrouiller maintenant")
+
+
+class DiskWriteFailureTestCase(GuiTestCase):
+    """Correctif audit Phase 1 (item 2) : un echec d'ecriture disque
+    (disque plein -> sqlite3.OperationalError, ou toute autre erreur
+    OSError/ValueError/sqlite3.Error) lors de l'ajout, la modification ou
+    la suppression d'une entree remontait auparavant totalement non
+    intercepte hors du callback Tkinter - invisible dans l'exe package
+    sans console (Coffre.spec, console=False). Reproduit ici en cassant
+    directement l'ecriture DB sous-jacente, comme le fait deja
+    tests/test_vault.py::test_a_storage_failure_during_change_master_password_leaves_the_old_password_working
+    pour le changement de mot de passe maitre."""
+
+    def test_add_entry_failure_shows_an_error_instead_of_crashing_silently(self):
+        self.app._open_entry_dialog(None)
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+
+        title_entry = _find_widget(dialog, lambda w: w.winfo_class() == "TEntry")
+        title_entry.focus_set()
+        title_entry.insert(0, "Nouveau site")
+        self.root.update()
+
+        save_button = _find_button(dialog, "Enregistrer")
+        with patch.object(self.app.vault.db, "add_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
+            with patch("gui.messagebox.showerror") as mock_error:
+                save_button.invoke()
+                self.root.update()
+
+        mock_error.assert_called_once()
+        self.assertIn("disk is full", str(mock_error.call_args))
+        # Le dialogue reste ouvert (pas de destroy()) : l'utilisateur ne
+        # perd pas la saisie deja faite et peut reessayer.
+        self.assertTrue(dialog.winfo_exists())
+        self.assertEqual(len(self.app.vault.list_entries()), 0, "aucune entree ne doit avoir ete ajoutee")
+        dialog.destroy()
+
+    def test_update_entry_failure_shows_an_error_instead_of_crashing_silently(self):
+        entry_id = self.app.vault.add_entry("Site existant", username="alice", password="secret")
+        self.app._refresh_entries()
+
+        self.app._open_entry_dialog(entry_id)
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+
+        save_button = _find_button(dialog, "Enregistrer")
+        with patch.object(self.app.vault.db, "update_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
+            with patch("gui.messagebox.showerror") as mock_error:
+                save_button.invoke()
+                self.root.update()
+
+        mock_error.assert_called_once()
+        dialog.destroy()
+
+    def test_delete_entry_failure_shows_an_error_instead_of_crashing_silently(self):
+        entry_id = self.app.vault.add_entry("Site a supprimer", username="alice", password="secret")
+        self.app._refresh_entries()
+        self.app.entries_tree.selection_set(str(entry_id))
+        self.root.update()
+
+        with patch.object(self.app.vault.db, "delete_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
+            with patch("gui.messagebox.askyesno", return_value=True):
+                with patch("gui.messagebox.showerror") as mock_error:
+                    self.app._delete_selected_entry()
+                    self.root.update()
+
+        mock_error.assert_called_once()
+        self.assertIn("disk is full", str(mock_error.call_args))
+        self.assertEqual(len(self.app.vault.list_entries()), 1, "l'entree ne doit pas avoir disparu de la liste en memoire")
 
 
 if __name__ == "__main__":
