@@ -133,6 +133,33 @@ class EntriesTestCase(unittest.TestCase):
         self.assertEqual(meta["kdf_salt"], b"ancien-sel")
         self.assertEqual(meta["verifier_nonce"], b"ancien-nonce")
 
+    def test_journal_mode_is_wal(self):
+        # Le mode WAL est cense etre actif des l'ouverture (optimisation
+        # trouvee a l'audit) - verifie que ce n'est pas juste une PRAGMA
+        # ignoree silencieusement (SQLite peut refuser WAL dans de rares
+        # configurations, ex: systeme de fichiers reseau).
+        mode = self.db.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
+
+    def test_backup_to_produces_a_complete_and_coherent_copy_in_wal_mode(self):
+        # Verifie specifiquement qu'activer WAL n'a pas casse backup_to :
+        # plusieurs entrees ajoutees SANS fermer/rouvrir la connexion (donc
+        # potentiellement encore dans le fichier -wal, pas encore dans le
+        # fichier principal) doivent quand meme toutes apparaitre dans la
+        # copie - l'API sqlite3.Connection.backup() est documentee comme
+        # gerant nativement WAL, verifie-le empiriquement plutot que de
+        # simplement s'y fier.
+        self.db.set_vault_meta(b"sel-wal", b"nonce-meta", b"cipher-meta")
+        entry_ids = [self.db.add_entry(f"nonce{i}".encode(), f"cipher{i}".encode()) for i in range(5)]
+        dest = self.tmp / "copie-wal.sqlite"
+        self.db.backup_to(dest)
+
+        copy = Database(dest)
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.get_vault_meta()["kdf_salt"], b"sel-wal")
+        for i, entry_id in enumerate(entry_ids):
+            self.assertEqual(copy.get_entry(entry_id)["ciphertext"], f"cipher{i}".encode())
+
     def test_backup_to_copies_meta_and_entries_unchanged(self):
         self.db.set_vault_meta(b"sel", b"nonce-meta", b"cipher-meta")
         entry_id = self.db.add_entry(b"nonce", b"cipher")
