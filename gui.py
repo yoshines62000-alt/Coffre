@@ -197,16 +197,29 @@ class CoffreApp:
             if self._create_password_var.get() != self._create_confirm_var.get():
                 messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
                 return
+            # derive_key (scrypt) prend ~360ms mesures et bloque le thread
+            # principal Tkinter : desactivation du bouton + curseur d'attente
+            # pour donner une retroaction visuelle et empecher un double-clic
+            # de lancer un second calcul scrypt en parallele (trouvaille
+            # d'audit "Phase 2"). update_idletasks() force le rendu de ces
+            # deux changements AVANT l'appel bloquant qui suit.
+            create_button.config(state="disabled")
+            self.root.config(cursor="wait")
+            self.root.update_idletasks()
             try:
                 self.vault.create(self._create_password_var.get())
             except VaultError as exc:
                 messagebox.showwarning(APP_TITLE, str(exc))
                 return
+            finally:
+                create_button.config(state="normal")
+                self.root.config(cursor="")
             self._create_password_var.set("")
             self._create_confirm_var.set("")
             self._show_vault_screen()
 
-        ttk.Button(frame, text="Creer le coffre", command=on_create).pack()
+        create_button = ttk.Button(frame, text="Creer le coffre", command=on_create)
+        create_button.pack()
         self._focus_creation_entry = entry1
         entry1.bind("<Return>", lambda event: entry2.focus_set())
         entry2.bind("<Return>", lambda event: on_create())
@@ -222,7 +235,17 @@ class CoffreApp:
         ttk.Label(frame, textvariable=self._unlock_status_var, foreground="#B00020").pack(pady=(0, 8))
 
         def on_unlock():
-            if self.vault.unlock(self._unlock_password_var.get()):
+            # Meme raison que sur l'ecran de creation : derive_key (scrypt)
+            # bloque le thread Tkinter ~360ms sans retroaction sinon.
+            unlock_button.config(state="disabled")
+            self.root.config(cursor="wait")
+            self.root.update_idletasks()
+            try:
+                unlocked = self.vault.unlock(self._unlock_password_var.get())
+            finally:
+                unlock_button.config(state="normal")
+                self.root.config(cursor="")
+            if unlocked:
                 self._unlock_password_var.set("")
                 self._unlock_status_var.set("")
                 self._show_vault_screen()
@@ -237,7 +260,8 @@ class CoffreApp:
                 self._unlock_status_var.set("Mot de passe incorrect.")
                 self._unlock_password_var.set("")
 
-        ttk.Button(frame, text="Deverrouiller", command=on_unlock).pack()
+        unlock_button = ttk.Button(frame, text="Deverrouiller", command=on_unlock)
+        unlock_button.pack()
         # Vault.backup_to fonctionne deja coffre verrouille (le fichier est
         # chiffre au repos, aucun dechiffrement n'est necessaire) et c'est
         # meme teste (test_backup_works_while_the_vault_is_locked) - mais
@@ -781,17 +805,28 @@ class CoffreApp:
             if new_var.get() != confirm_var.get():
                 messagebox.showwarning(APP_TITLE, "Les deux nouveaux mots de passe ne correspondent pas.", parent=dialog)
                 return
+            # change_master_password derive DEUX cles scrypt (ancien puis
+            # nouveau mot de passe), donc ~2x360ms mesures ici - retroaction
+            # visuelle d'autant plus necessaire que sur les deux autres
+            # ecrans (creation/deverrouillage).
+            save_button.config(state="disabled")
+            self.root.config(cursor="wait")
+            self.root.update_idletasks()
             try:
                 self.vault.change_master_password(current_var.get(), new_var.get())
             except VaultError as exc:
                 messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
                 return
+            finally:
+                save_button.config(state="normal")
+                self.root.config(cursor="")
             dialog.destroy()
             messagebox.showinfo(APP_TITLE, "Mot de passe maitre change avec succes.")
 
         buttons = ttk.Frame(dialog)
         buttons.grid(row=3, column=0, columnspan=2, pady=10)
-        ttk.Button(buttons, text="Enregistrer", command=on_save).pack(side=LEFT, padx=5)
+        save_button = ttk.Button(buttons, text="Enregistrer", command=on_save)
+        save_button.pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
     # -- verrouillage automatique par inactivite ---------------------------------

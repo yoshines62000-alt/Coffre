@@ -382,6 +382,163 @@ class ToolbarLayoutTestCase(GuiTestCase):
         self.assertEqual(button.cget("text"), "Verrouiller maintenant")
 
 
+class BlockingOperationFeedbackTestCase(unittest.TestCase):
+    """Correctif audit Phase 2 : derive_key (scrypt), utilise par
+    vault.create()/unlock()/change_master_password(), est mesure a ~360ms
+    (le double pour un changement de mot de passe, qui derive l'ancien ET
+    le nouveau) et bloque entierement le thread principal Tkinter pendant
+    ce delai. Avant correctif, aucune retroaction visuelle n'accompagnait
+    ce gel (l'utilisateur ne peut pas savoir si l'app a plante) et rien
+    n'empechait un double-clic accidentel de declencher un second calcul
+    scrypt en parallele des que le bouton redevenait reactif entre deux
+    clics. Chacun des trois boutons concernes ("Creer le coffre",
+    "Deverrouiller", "Enregistrer" du changement de mot de passe maitre)
+    doit desormais se desactiver et faire passer le curseur de la fenetre
+    en curseur d'attente PENDANT l'appel bloquant, verifie ici en
+    interceptant la methode Vault concernee pour observer l'etat du bouton
+    et du curseur au milieu meme de l'appel (avant qu'il ne soit reactive
+    au retour) - puis revenir a la normale une fois l'appel termine."""
+
+    def setUp(self):
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.addCleanup(self._teardown)
+
+    def _teardown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _new_app(self):
+        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+            return CoffreApp(self.root)
+
+    def test_create_button_is_disabled_and_cursor_waits_during_vault_create(self):
+        app = self._new_app()
+        self.root.update()
+        button = _find_button(app.unlock_frame, "Creer le coffre")
+        app._create_password_var.set("nouveau-mot-de-passe-maitre")
+        app._create_confirm_var.set("nouveau-mot-de-passe-maitre")
+
+        observed = {}
+        real_create = app.vault.create
+
+        def spying_create(password):
+            observed["button_state"] = str(button.cget("state"))
+            observed["cursor"] = str(self.root.cget("cursor"))
+            return real_create(password)
+
+        with patch.object(app.vault, "create", side_effect=spying_create):
+            button.invoke()
+            self.root.update()
+
+        self.assertEqual(observed["button_state"], "disabled", "le bouton doit etre desactive PENDANT l'appel bloquant")
+        self.assertEqual(observed["cursor"], "wait", "le curseur d'attente doit etre affiche PENDANT l'appel bloquant")
+        self.assertEqual(str(button.cget("state")), "normal", "le bouton doit redevenir actif une fois l'appel termine")
+        self.assertEqual(str(self.root.cget("cursor")), "", "le curseur doit redevenir normal une fois l'appel termine")
+        self.assertTrue(app.vault.is_unlocked, "le coffre doit malgre tout avoir ete cree et ouvert normalement")
+
+    def test_unlock_button_is_disabled_and_cursor_waits_during_vault_unlock(self):
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mon-mot-de-passe-maitre")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        button = _find_button(app.unlock_frame, "Deverrouiller")
+        app._unlock_password_var.set("mon-mot-de-passe-maitre")
+
+        observed = {}
+        real_unlock = app.vault.unlock
+
+        def spying_unlock(password):
+            observed["button_state"] = str(button.cget("state"))
+            observed["cursor"] = str(self.root.cget("cursor"))
+            return real_unlock(password)
+
+        with patch.object(app.vault, "unlock", side_effect=spying_unlock):
+            button.invoke()
+            self.root.update()
+
+        self.assertEqual(observed["button_state"], "disabled", "le bouton doit etre desactive PENDANT l'appel bloquant")
+        self.assertEqual(observed["cursor"], "wait", "le curseur d'attente doit etre affiche PENDANT l'appel bloquant")
+        self.assertEqual(str(button.cget("state")), "normal", "le bouton doit redevenir actif une fois l'appel termine")
+        self.assertEqual(str(self.root.cget("cursor")), "", "le curseur doit redevenir normal une fois l'appel termine")
+        self.assertTrue(app.vault.is_unlocked, "le deverrouillage doit malgre tout avoir reussi normalement")
+
+    def test_unlock_button_is_reenabled_even_after_a_wrong_password(self):
+        # Le finally doit reactiver le bouton et restaurer le curseur meme
+        # quand vault.unlock() renvoie False (mot de passe incorrect) plutot
+        # que de lever une exception - chemin distinct du test ci-dessus.
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mon-mot-de-passe-maitre")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        button = _find_button(app.unlock_frame, "Deverrouiller")
+        app._unlock_password_var.set("mot-de-passe-incorrect")
+
+        button.invoke()
+        self.root.update()
+
+        self.assertEqual(str(button.cget("state")), "normal")
+        self.assertEqual(str(self.root.cget("cursor")), "")
+        self.assertFalse(app.vault.is_unlocked)
+
+    def test_save_button_is_disabled_and_cursor_waits_during_change_master_password(self):
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mot-de-passe-maitre-actuel")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        app._unlock_password_var.set("mot-de-passe-maitre-actuel")
+        _find_button(app.unlock_frame, "Deverrouiller").invoke()
+        self.root.update()
+        if app._auto_lock_job is not None:
+            self.root.after_cancel(app._auto_lock_job)
+            app._auto_lock_job = None
+        self.addCleanup(lambda: app._close_all_dialogs())
+
+        app._open_change_password_dialog()
+        dialog = app._open_dialogs[-1]
+        self.root.update()
+
+        current_entry = dialog.grid_slaves(row=0, column=1)[0]
+        new_entry = dialog.grid_slaves(row=1, column=1)[0]
+        confirm_entry = dialog.grid_slaves(row=2, column=1)[0]
+        current_entry.insert(0, "mot-de-passe-maitre-actuel")
+        new_entry.insert(0, "nouveau-mot-de-passe-maitre")
+        confirm_entry.insert(0, "nouveau-mot-de-passe-maitre")
+
+        button = _find_button(dialog, "Enregistrer")
+        observed = {}
+        real_change = app.vault.change_master_password
+
+        def spying_change(current, new):
+            observed["button_state"] = str(button.cget("state"))
+            observed["cursor"] = str(self.root.cget("cursor"))
+            return real_change(current, new)
+
+        with patch.object(app.vault, "change_master_password", side_effect=spying_change):
+            with patch("gui.messagebox.showinfo") as mock_info:
+                button.invoke()
+                self.root.update()
+
+        self.assertEqual(observed["button_state"], "disabled", "le bouton doit etre desactive PENDANT l'appel bloquant")
+        self.assertEqual(observed["cursor"], "wait", "le curseur d'attente doit etre affiche PENDANT l'appel bloquant")
+        # Le dialogue se ferme (dialog.destroy()) une fois le changement
+        # reussi : le bouton n'existe donc plus pour verifier son etat
+        # apres coup, mais le curseur de la fenetre principale, lui,
+        # survit et doit avoir ete restaure a la normale.
+        self.assertEqual(str(self.root.cget("cursor")), "", "le curseur doit redevenir normal une fois l'appel termine")
+        mock_info.assert_called_once()
+        self.assertFalse(dialog.winfo_exists())
+
+
 class DiskWriteFailureTestCase(GuiTestCase):
     """Correctif audit Phase 1 (item 2) : un echec d'ecriture disque
     (disque plein -> sqlite3.OperationalError, ou toute autre erreur
