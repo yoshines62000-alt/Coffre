@@ -382,6 +382,85 @@ class ToolbarLayoutTestCase(GuiTestCase):
         self.assertEqual(button.cget("text"), "Verrouiller maintenant")
 
 
+class ActionsColumnLayoutTestCase(GuiTestCase):
+    """Correctif audit C2 : a la taille minimale de fenetre que
+    l'application declare elle-meme supporter (root.minsize(750, 450)), le
+    gestionnaire de geometrie "pack" de Tk allouait l'espace disponible dans
+    l'ORDRE DES APPELS a pack() plutot que par "side" - entries_tree, empa-
+    quete en premier avec expand=True, accaparait systematiquement toute sa
+    largeur demandee (660px, somme des largeurs de colonnes declarees),
+    laissant a la colonne "actions" (empaquetee en dernier, sans expand) les
+    quelques pixels restants une fois la fenetre trop etroite. Mesure reelle
+    a l'audit : a 750px de large, "actions" ne recevait plus que 40px sur
+    131px requis, tronquant simultanement "Copier l'identifiant" ET
+    "Copier le mot de passe" au meme libelle affiche "Copie", rendant les
+    deux boutons indiscernables - risque concret de copier le mauvais
+    secret (identifiant vs mot de passe) au mauvais endroit. Le correctif
+    empaquete desormais "actions" et la scrollbar (a droite) AVANT
+    entries_tree, qui absorbe seul toute reduction de largeur en dernier."""
+
+    def _resize_to_minsize(self):
+        # winfo_width()/winfo_reqwidth() ne refletent la geometrie reelle
+        # negociee par le gestionnaire de fenetres que si la fenetre est
+        # effectivement mappee a l'ecran - un root.withdraw() (etat par
+        # defaut de GuiTestCase, pour ne pas faire clignoter de fenetre
+        # visible pendant la suite de tests) fige la largeur a la derniere
+        # geometrie appliquee avant le withdraw et root.geometry() n'a alors
+        # plus aucun effet mesurable sur winfo_width(). On re-affiche donc
+        # temporairement la fenetre pour ce test precis, ce qui reproduit
+        # fidelement les conditions de l'audit visuel original (vraie
+        # fenetre Tk mappee, redimensionnee a root.minsize()).
+        min_width, min_height = self.root.wm_minsize()
+        self.root.deiconify()
+        self.root.geometry(f"{min_width}x{min_height}")
+        self.root.update_idletasks()
+        self.root.update()
+
+    def test_actions_column_keeps_its_full_requested_width_at_minsize(self):
+        self._resize_to_minsize()
+        add_button = _find_button(self.app.vault_frame, "Ajouter...")
+        actions = add_button.master
+        self.assertGreaterEqual(
+            actions.winfo_width(), actions.winfo_reqwidth(),
+            "la colonne d'actions est comprimee en dessous de sa largeur "
+            "requise a la taille minimale de fenetre declaree par l'application",
+        )
+
+    def test_action_buttons_stay_distinguishable_at_minsize(self):
+        # Verifie individuellement chaque bouton plutot que la seule frame
+        # englobante : c'est bien le texte de CHAQUE bouton qui doit rester
+        # entierement affiche, "Copier l'identifiant" et "Copier le mot de
+        # passe" en particulier, dont les libelles tronques a 4-5 caracteres
+        # ("Copie") devenaient identiques et donc indiscernables a l'ecran.
+        self._resize_to_minsize()
+        for text in [
+            "Ajouter...", "Modifier...", "Supprimer",
+            "Copier l'identifiant", "Copier le mot de passe",
+        ]:
+            button = _find_button(self.app.vault_frame, text)
+            self.assertIsNotNone(button, f"bouton introuvable : {text}")
+            self.assertGreaterEqual(
+                button.winfo_width(), button.winfo_reqwidth(),
+                f"bouton tronque a la taille minimale de fenetre : {text!r} "
+                f"(largeur allouee {button.winfo_width()}px < largeur requise {button.winfo_reqwidth()}px)",
+            )
+
+    def test_copy_username_and_copy_password_buttons_remain_visually_distinct_at_minsize(self):
+        # Assertion la plus directe possible sur le risque decrit dans
+        # l'audit (copier le mauvais secret) : les deux boutons ne doivent
+        # jamais recevoir une largeur si etroite que Tk serait contraint de
+        # clipper leur libelle a un prefixe commun ("Copie").
+        self._resize_to_minsize()
+        copy_username = _find_button(self.app.vault_frame, "Copier l'identifiant")
+        copy_password = _find_button(self.app.vault_frame, "Copier le mot de passe")
+        self.assertGreaterEqual(copy_username.winfo_width(), copy_username.winfo_reqwidth())
+        self.assertGreaterEqual(copy_password.winfo_width(), copy_password.winfo_reqwidth())
+        # Le libelle complet (attribut Tk, pas le rendu clippe a l'ecran)
+        # doit rester distinct - garde-fou trivial mais bon marche contre
+        # une future regression qui renommerait les deux boutons a l'identique.
+        self.assertNotEqual(copy_username.cget("text"), copy_password.cget("text"))
+
+
 class BlockingOperationFeedbackTestCase(unittest.TestCase):
     """Correctif audit Phase 2 : derive_key (scrypt), utilise par
     vault.create()/unlock()/change_master_password(), est mesure a ~360ms

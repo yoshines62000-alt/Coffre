@@ -371,22 +371,47 @@ class CoffreApp:
         for col, label, width in [("title", "Titre", 200), ("username", "Identifiant", 200), ("url", "Site / URL", 260)]:
             self.entries_tree.heading(col, text=label)
             self.entries_tree.column(col, width=width, anchor="w")
-        self.entries_tree.pack(side=LEFT, fill=BOTH, expand=True)
         self.entries_tree.bind("<Double-1>", lambda event: self._open_entry_dialog(self._selected_entry_id_from_tree()))
         self.entries_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
         scrollbar = ttk.Scrollbar(body, orient=VERTICAL, command=self.entries_tree.yview)
-        scrollbar.pack(side=LEFT, fill=Y)
         self.entries_tree.configure(yscrollcommand=scrollbar.set)
 
         actions = ttk.Frame(body)
-        actions.pack(side=LEFT, fill=Y, padx=(10, 0))
         ttk.Button(actions, text="Ajouter...", command=lambda: self._open_entry_dialog(None)).pack(fill=X, pady=2)
         ttk.Button(actions, text="Modifier...", command=lambda: self._open_entry_dialog(self._selected_entry_id_from_tree())).pack(fill=X, pady=2)
         ttk.Button(actions, text="Supprimer", command=self._delete_selected_entry).pack(fill=X, pady=2)
         ttk.Separator(actions, orient="horizontal").pack(fill=X, pady=6)
         ttk.Button(actions, text="Copier l'identifiant", command=lambda: self._copy_field("username")).pack(fill=X, pady=2)
         ttk.Button(actions, text="Copier le mot de passe", command=lambda: self._copy_field("password")).pack(fill=X, pady=2)
+
+        # Ordre de pack() volontairement inverse de l'ordre visuel (correctif
+        # audit C2) : le gestionnaire "pack" de Tk alloue l'espace du cavity
+        # dans l'ordre des APPELS a pack(), pas dans l'ordre visuel ni selon
+        # "side" - le premier widget empaquete recoit sa largeur demandee en
+        # entier avant que les suivants ne voient le moindre pixel restant.
+        # Avec l'ancien ordre (tree, scrollbar, actions, tous les trois
+        # pack()-es dans cet ordre), entries_tree - empaquete en premier avec
+        # expand=True - accaparait systematiquement la totalite de sa largeur
+        # demandee (660px, la somme des largeurs de colonnes declarees),
+        # laissant "actions" (empaquete en dernier, sans expand) recevoir
+        # seulement les pixels restants une fois la fenetre trop etroite : a
+        # minsize() (750x450), il ne restait que 40px pour les 5 boutons,
+        # tronquant "Copier l'identifiant" ET "Copier le mot de passe" au
+        # meme libelle illisible "Copie" - mesure exacte a l'audit via
+        # winfo_reqwidth()/winfo_width(). En empaquetant "actions" (a droite,
+        # side=RIGHT) puis "scrollbar" (a droite, donc juste a gauche de
+        # actions) AVANT entries_tree, ce sont eux qui recoivent leur largeur
+        # demandee en priorite, et entries_tree (toujours expand=True,
+        # fill=BOTH, empaquete en dernier) absorbe seul toute reduction de
+        # largeur de la fenetre - un Treeview reste lisible avec des colonnes
+        # plus etroites, contrairement a des libelles de bouton tronques et
+        # rendus indiscernables. Verrouille par
+        # ActionsColumnLayoutTestCase.test_action_buttons_stay_distinguishable_at_minsize
+        # dans tests/test_gui.py, sur le modele de ToolbarLayoutTestCase.
+        actions.pack(side=RIGHT, fill=Y, padx=(10, 0))
+        scrollbar.pack(side=RIGHT, fill=Y)
+        self.entries_tree.pack(side=LEFT, fill=BOTH, expand=True)
 
         ttk.Label(
             frame, text="Double-cliquez sur une ligne pour la modifier. Le presse-papier est efface "
