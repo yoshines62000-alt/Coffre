@@ -22,7 +22,7 @@ from vault import MIN_MASTER_PASSWORD_LENGTH, Vault, VaultError, generate_passwo
 
 APP_TITLE = "Coffre"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 UPDATE_REPO = "yoshines62000-alt/Coffre"
 RELEASES_URL = f"https://github.com/{UPDATE_REPO}/releases/latest"
 AUTO_LOCK_SECONDS = 300
