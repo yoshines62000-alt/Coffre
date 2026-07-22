@@ -111,7 +111,28 @@ python -m pip install -r requirements.txt
 - Aucune donnée ne quitte votre machine : pas de compte, pas de serveur, pas
   de télémétrie, aucune synchronisation.
 - Les données sont stockées, entièrement chiffrées, dans
-  `%APPDATA%\Coffre\coffre.sqlite`.
+  `%APPDATA%\Coffre\coffre.sqlite` (résolu depuis la variable d'environnement
+  `%APPDATA%` elle-même, y compris si elle est redirigée par une politique
+  d'entreprise).
+- Sur un profil itinérant (roaming profile) où `%APPDATA%` est un partage
+  réseau, Coffre détecte automatiquement ce cas et désactive le mode WAL de
+  SQLite (dont la documentation officielle déconseille l'usage sur certains
+  systèmes de fichiers réseau) au profit du mode journal par défaut, plus
+  lent mais dont le verrouillage est mieux supporté sur ce type de stockage.
+
+## Limites connues
+
+Par honnêteté envers les utilisateurs, plutôt que de laisser ces limites se
+découvrir à l'usage :
+
+- **Accessibilité (lecteur d'écran)** : l'interface est construite avec
+  Tkinter/ttk, dont le support des technologies d'assistance (Narrator,
+  NVDA, JAWS) est historiquement faible sur toutes les plateformes et tous
+  les thèmes, indépendamment de tout choix propre à Coffre. Une personne
+  dépendante d'un lecteur d'écran risque donc une expérience dégradée ou
+  inutilisable. Il n'existe pas de correctif de code réaliste à court terme
+  compte tenu du choix technologique déjà fait pour l'ensemble de l'outil ;
+  cette limite est documentée ici plutôt que passée sous silence.
 
 ## Créer un exécutable autonome (.exe)
 
@@ -128,6 +149,20 @@ L'exécutable est produit dans `dist/Coffre.exe` (fichier unique, sans
 console). Le fichier `.spec` du dépôt fixe la configuration de build pour un
 résultat reproductible. Les dossiers `build/` et `dist/` ne sont pas suivis
 par Git.
+
+Pour un build de **release** parfaitement reproductible (même version exacte
+de `cryptography` et de sa chaîne de dépendances qu'au build précédent),
+utiliser `requirements-lock.txt` plutôt que `requirements.txt` (qui ne fixe
+volontairement qu'un plancher de version, `cryptography>=42.0`, pour les
+contributeurs) :
+
+```bash
+python -m pip install -r requirements-lock.txt
+python -m PyInstaller Coffre.spec
+```
+
+`requirements-lock.txt` doit être régénéré et commité avant chaque nouvelle
+release (voir le commentaire en tête de ce fichier pour la procédure).
 
 ### Processus de publication d'une release
 
@@ -163,7 +198,8 @@ db.py                  # couche donnees SQLite : stocke des blobs chiffres opaqu
 vault.py               # logique metier : creation/deverrouillage/verrouillage, CRUD, generateur
 gui.py                  # interface graphique Tkinter
 tests/                  # tests automatises
-requirements.txt       # cryptography
+requirements.txt       # cryptography (plancher de version, pour les contributeurs)
+requirements-lock.txt  # versions exactes figees pour un build de release reproductible
 Lancer.vbs             # raccourci de lancement double-clic (sans console)
 Lancer.bat             # raccourci de lancement double-clic (avec console, pour debug)
 Coffre.spec            # configuration de build PyInstaller (.exe autonome)

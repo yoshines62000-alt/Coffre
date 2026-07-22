@@ -18,6 +18,7 @@ trouves a l'audit :
    automatique par inactivite, sans jamais retarder ce verrouillage."""
 
 import ctypes
+import os
 import sqlite3
 import sys
 import tempfile
@@ -1171,6 +1172,163 @@ class UpdateCheckTimerCancelledOnCloseTestCase(unittest.TestCase):
         app._poll_update_check()
 
         self.assertIsNone(app._update_check_job, "aucun nouveau timer ne doit etre programme une fois un resultat traite")
+
+
+class DataDirResolutionTestCase(unittest.TestCase):
+    """Audit B3 : _data_dir() doit resoudre le dossier de donnees via la
+    variable d'environnement %APPDATA% explicitement (celle que Windows
+    expose lui-meme) plutot qu'en la reconstruisant depuis Path.home()
+    (%USERPROFILE%) - les deux peuvent diverger sur une machine geree en
+    entreprise ou %APPDATA% est redirige."""
+
+    def test_uses_the_appdata_environment_variable_when_present(self):
+        with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
+            self.assertEqual(gui._data_dir(), Path(r"C:\FakeAppData") / "Coffre")
+
+    def test_reflects_a_redirected_appdata_different_from_the_default_roaming_path(self):
+        # Le scenario precis motivant ce correctif : %APPDATA% redirige
+        # (environnement gere) vers un chemin different de
+        # Path.home()/AppData/Roaming - Coffre doit suivre %APPDATA%, pas
+        # deviner un chemin par defaut qui ne correspond plus a rien.
+        redirected = r"D:\Redirected\Profiles\utilisateur\AppData\Roaming"
+        with patch.dict(os.environ, {"APPDATA": redirected}):
+            data_dir = gui._data_dir()
+        self.assertEqual(data_dir, Path(redirected) / "Coffre")
+        self.assertNotEqual(data_dir, Path.home() / "AppData" / "Roaming" / "Coffre")
+
+    def test_falls_back_to_path_home_when_appdata_is_absent(self):
+        env_without_appdata = {k: v for k, v in os.environ.items() if k != "APPDATA"}
+        with patch.dict(os.environ, env_without_appdata, clear=True):
+            self.assertEqual(gui._data_dir(), Path.home() / "AppData" / "Roaming" / "Coffre")
+
+    def test_always_returns_a_coffre_subfolder(self):
+        with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
+            self.assertEqual(gui._data_dir().name, "Coffre")
+
+
+class TreeviewColumnRedistributionTestCase(GuiTestCase):
+    """Correctif audit C9 : a une largeur de fenetre superieure a la
+    largeur par defaut (900x580, ex. 1400x800), les trois colonnes du
+    Treeview restaient figees a leur largeur declaree (200/200/260px),
+    laissant une bande vide inutilisee a droite avant la scrollbar. Titre
+    et Identifiant (contenu generalement court) restent desormais a
+    largeur fixe ; Site/URL (contenu qui beneficie le plus d'espace
+    supplementaire) absorbe seule tout agrandissement au-dela de la
+    largeur par defaut."""
+
+    def _resize_to(self, width, height):
+        # Meme raison que ActionsColumnLayoutTestCase._resize_to_minsize :
+        # une fenetre withdraw() (etat par defaut de GuiTestCase) fige la
+        # largeur mesurable par winfo_width() a la derniere geometrie
+        # appliquee avant le withdraw.
+        self.root.deiconify()
+        self.root.geometry(f"{width}x{height}")
+        self.root.update_idletasks()
+        self.root.update()
+
+    def test_title_and_username_columns_keep_their_base_width_when_enlarged(self):
+        self._resize_to(1400, 800)
+        self.assertEqual(self.app.entries_tree.column("title", "width"), 200)
+        self.assertEqual(self.app.entries_tree.column("username", "width"), 200)
+
+    def test_url_column_absorbs_the_extra_width_when_the_window_is_enlarged(self):
+        self._resize_to(1400, 800)
+        url_width = self.app.entries_tree.column("url", "width")
+        self.assertGreater(
+            url_width, 260,
+            "la colonne Site/URL doit s'elargir pour occuper l'espace disponible a une grande taille de fenetre",
+        )
+
+    def test_no_significant_empty_gap_remains_before_the_scrollbar_when_enlarged(self):
+        self._resize_to(1400, 800)
+        tree = self.app.entries_tree
+        total_columns_width = sum(tree.column(c, "width") for c in ("title", "username", "url"))
+        # Petite marge (bordures internes...) plutot qu'une egalite stricte
+        # au pixel pres - l'important est l'ABSENCE d'un ecart large comme
+        # celui constate a l'audit (plusieurs centaines de pixels).
+        gap = tree.winfo_width() - total_columns_width
+        self.assertLessEqual(
+            gap, 40,
+            f"ecart de {gap}px entre la largeur du Treeview et la somme de ses colonnes : "
+            "une bande vide significative reapparait (constat d'audit C9)",
+        )
+
+    def test_columns_never_shrink_below_their_base_width_at_the_default_size(self):
+        # Non-regression a la taille par defaut (900x580) : aucune colonne
+        # ne doit se retrouver reduite en dessous de sa largeur de base.
+        self.root.update_idletasks()
+        self.assertGreaterEqual(self.app.entries_tree.column("title", "width"), 200)
+        self.assertGreaterEqual(self.app.entries_tree.column("username", "width"), 200)
+        self.assertGreaterEqual(self.app.entries_tree.column("url", "width"), 260)
+
+
+class SearchDebounceTestCase(GuiTestCase):
+    """Correctif audit J1 : _refresh_entries() (copie de toutes les
+    entrees en memoire, tri, vidage+reinsertion complete du Treeview) ne
+    doit plus s'executer a CHAQUE caractere tape dans le champ de
+    recherche, mais seulement une fois, SEARCH_DEBOUNCE_MS apres la
+    DERNIERE frappe d'une rafale."""
+
+    def setUp(self):
+        super().setUp()
+        self.app.vault.add_entry(title="Exemple Un", username="u1", password="p1", url="")
+        self.app.vault.add_entry(title="Autre Titre", username="u2", password="p2", url="")
+        self.app._refresh_entries()
+        self.root.update()
+
+    def _wait_until(self, predicate, timeout=2.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.root.update()
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return False
+
+    def test_setting_the_search_value_does_not_refresh_the_list_immediately(self):
+        self.app.search_var.set("exemple")
+        # Immediatement apres la frappe (avant qu'aucun after() n'ait eu
+        # l'occasion de s'executer), la liste ne doit pas encore avoir ete
+        # filtree.
+        self.assertEqual(len(self.app.entries_tree.get_children()), 2)
+
+    def test_the_list_is_filtered_once_the_debounce_delay_elapses(self):
+        self.app.search_var.set("exemple")
+        filtered = self._wait_until(lambda: len(self.app.entries_tree.get_children()) == 1)
+        self.assertTrue(filtered, "la liste n'a jamais ete filtree apres le delai d'anti-rebond")
+
+    def test_rapid_successive_keystrokes_only_trigger_a_single_refresh(self):
+        refresh_calls = []
+        original_refresh = self.app._refresh_entries
+
+        def counting_refresh():
+            refresh_calls.append(1)
+            original_refresh()
+
+        with patch.object(self.app, "_refresh_entries", side_effect=counting_refresh):
+            for partial in ["e", "ex", "exe", "exem", "exemp", "exemple"]:
+                self.app.search_var.set(partial)
+                self.root.update()  # laisse le timer se (re)programmer sans le laisser expirer
+            self._wait_until(lambda: len(refresh_calls) > 0)
+            # Laisse une marge apres le premier rafraichissement observe
+            # pour s'assurer qu'aucun second ne suit.
+            self._wait_until(lambda: False, timeout=0.3)
+        self.assertEqual(
+            len(refresh_calls), 1,
+            f"un seul rafraichissement doit avoir lieu malgre {refresh_calls} frappes rapprochees",
+        )
+
+    def test_the_pending_debounce_job_is_cancelled_when_the_vault_locks(self):
+        self.app.search_var.set("exemple")
+        self.assertIsNotNone(self.app._search_debounce_job)
+        self.app._lock_vault()  # ne doit lever aucune erreur
+        self.assertIsNone(self.app._search_debounce_job)
+
+    def test_the_pending_debounce_job_is_cancelled_on_close(self):
+        self.app.search_var.set("exemple")
+        self.assertIsNotNone(self.app._search_debounce_job)
+        self.app._on_close()  # ne doit lever aucune erreur
+        self.assertIsNone(self.app._search_debounce_job)
 
 
 if __name__ == "__main__":

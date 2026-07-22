@@ -85,5 +85,110 @@ class VersionResourceFileTestCase(unittest.TestCase):
         self.assertIsNotNone(version_info)
 
 
+class IconMultiResolutionTestCase(unittest.TestCase):
+    """Correctif audit D1 : icon.ico ne contenait qu'une seule image
+    integree (16x16, 190 octets) - partout ou Windows a besoin de
+    l'afficher plus grande (barre des taches, Alt-Tab, raccourci bureau en
+    icones moyennes/grandes, explorateur de fichiers), il devait upscaler
+    cette petite image, resultant en un rendu flou/pixellise. icon.ico
+    embarque desormais un jeu complet de resolutions standard (16/32/48/
+    256px), chacune generee explicitement (pas laissee a un upscale
+    automatique de dernier recours par Windows a l'affichage)."""
+
+    EXPECTED_SIZES = {(16, 16), (32, 32), (48, 48), (256, 256)}
+
+    def setUp(self):
+        self.icon_path = REPO_ROOT / "icon.ico"
+
+    def test_icon_file_exists(self):
+        self.assertTrue(self.icon_path.exists())
+
+    def test_icon_embeds_every_expected_resolution(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow n'est pas installe dans cet environnement de test")
+        with Image.open(self.icon_path) as im:
+            embedded_sizes = set(im.info.get("sizes", set()))
+        missing = self.EXPECTED_SIZES - embedded_sizes
+        self.assertFalse(
+            missing,
+            f"icon.ico n'embarque pas les resolutions attendues : manquantes = {missing}",
+        )
+
+    def test_each_embedded_frame_actually_matches_its_declared_size(self):
+        # Verification plus forte que la seule metadonnee "sizes" ci-dessus :
+        # charge reellement chaque frame declaree et confirme ses dimensions
+        # effectives, pour attraper une eventuelle regression ou une entree
+        # de taille declaree mais mal formee.
+        try:
+            from PIL import Image
+        except ImportError:
+            self.skipTest("Pillow n'est pas installe dans cet environnement de test")
+        for size in sorted(self.EXPECTED_SIZES):
+            with Image.open(self.icon_path) as im:
+                im.size = size
+                im.load()
+                self.assertEqual(im.size, size)
+
+    def test_coffre_spec_still_references_the_single_icon_file(self):
+        # Un seul fichier .ico multi-resolution, pas un fichier separe par
+        # taille - Coffre.spec ne doit pas avoir change sur ce point.
+        spec_text = (REPO_ROOT / "Coffre.spec").read_text(encoding="utf-8")
+        self.assertIn("icon=['icon.ico']", spec_text.replace('"', "'"))
+
+
+class DependencyLockFileTestCase(unittest.TestCase):
+    """Correctif audit F1 : requirements.txt ne fixe qu'un PLANCHER de
+    version (`cryptography>=42.0`), sans borne superieure ni fichier de
+    verrouillage - deux builds de release a des dates differentes peuvent
+    donc embarquer des versions differentes de `cryptography` sans que
+    cela soit trace nulle part, remettant en cause la reproductibilite
+    d'un build. requirements-lock.txt fige les versions exactes utilisees
+    pour un build donne, en complement (pas en remplacement) de
+    requirements.txt (qui garde sa plage ouverte pour les contributeurs)."""
+
+    def setUp(self):
+        self.requirements_path = REPO_ROOT / "requirements.txt"
+        self.lock_path = REPO_ROOT / "requirements-lock.txt"
+
+    def test_lock_file_exists(self):
+        self.assertTrue(
+            self.lock_path.exists(),
+            "requirements-lock.txt doit exister a la racine du depot (constat d'audit F1)",
+        )
+
+    def test_lock_file_pins_an_exact_cryptography_version(self):
+        text = self.lock_path.read_text(encoding="utf-8")
+        match = re.search(r"^cryptography==([\d.]+)$", text, re.MULTILINE)
+        self.assertIsNotNone(
+            match,
+            "requirements-lock.txt doit fixer une version EXACTE de cryptography (==), pas une plage",
+        )
+
+    def test_requirements_txt_keeps_its_open_floor_unchanged(self):
+        # requirements-lock.txt est un COMPLEMENT, pas un remplacement :
+        # requirements.txt doit garder sa plage ouverte pour les
+        # contributeurs qui lancent Coffre depuis le code source.
+        text = self.requirements_path.read_text(encoding="utf-8")
+        self.assertIn("cryptography>=42.0", text)
+
+    def test_locked_cryptography_version_satisfies_the_floor_in_requirements_txt(self):
+        req_text = self.requirements_path.read_text(encoding="utf-8")
+        floor_match = re.search(r"cryptography>=([\d.]+)", req_text)
+        self.assertIsNotNone(floor_match)
+        floor = tuple(int(part) for part in floor_match.group(1).split("."))
+
+        lock_text = self.lock_path.read_text(encoding="utf-8")
+        pinned_match = re.search(r"^cryptography==([\d.]+)$", lock_text, re.MULTILINE)
+        self.assertIsNotNone(pinned_match)
+        pinned = tuple(int(part) for part in pinned_match.group(1).split("."))
+
+        self.assertGreaterEqual(
+            pinned, floor,
+            "la version figee dans requirements-lock.txt doit respecter le plancher de requirements.txt",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

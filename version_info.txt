@@ -20,8 +20,8 @@
 # l'interpreteur Python, il ne peut donc pas importer gui.py directement).
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 11, 0),
-    prodvers=(1, 0, 11, 0),
+    filevers=(1, 0, 12, 0),
+    prodvers=(1, 0, 12, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -36,12 +36,12 @@ VSVersionInfo(
         u'040c04b0',
         [StringStruct(u'CompanyName', u'john.dev62'),
         StringStruct(u'FileDescription', u'Coffre - gestionnaire de mots de passe local chiffre'),
-        StringStruct(u'FileVersion', u'1.0.11'),
+        StringStruct(u'FileVersion', u'1.0.12'),
         StringStruct(u'InternalName', u'Coffre'),
         StringStruct(u'LegalCopyright', u'Copyright (c) 2026 john.dev62 - licence MIT'),
         StringStruct(u'OriginalFilename', u'Coffre.exe'),
         StringStruct(u'ProductName', u'Coffre'),
-        StringStruct(u'ProductVersion', u'1.0.11')])
+        StringStruct(u'ProductVersion', u'1.0.12')])
       ]),
     VarFileInfo([VarStruct(u'Translation', [1036, 1200])])
   ]

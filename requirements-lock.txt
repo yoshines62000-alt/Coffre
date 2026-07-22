@@ -1,0 +1,27 @@
+# Fichier de verrouillage pour un build de release REPRODUCTIBLE
+# (constat d'audit F1) - complement de requirements.txt (qui garde
+# volontairement une plage ouverte ">=42.0" pour les contributeurs qui
+# lancent Coffre depuis le code source), PAS un remplacement.
+#
+# requirements.txt seul ne garantit rien : deux builds de dist/Coffre.exe
+# a des dates differentes peuvent embarquer des versions differentes de
+# `cryptography` (et de sa propre chaine de dependances) sans que cela
+# soit trace nulle part. Les versions ci-dessous sont celles reellement
+# utilisees pour construire la release v1.0.12 (verifiees via
+# `pip show cryptography`/`pip show cffi`/`pip show pycparser` dans
+# l'environnement de build), figees explicitement plutot que laissees a
+# la resolution de dependances du jour.
+#
+# A REGENERER et committer AVANT chaque nouvelle release, dans
+# l'environnement de build reellement utilise pour PyInstaller :
+#
+#   python -m pip install --upgrade -r requirements.txt
+#   python -m pip freeze | findstr /i "cryptography cffi pycparser" > requirements-lock.txt
+#
+# Pour un build reproductible a partir de ce fichier :
+#
+#   python -m pip install -r requirements-lock.txt
+#   python -m PyInstaller Coffre.spec
+cryptography==49.0.0
+cffi==2.1.0
+pycparser==3.0

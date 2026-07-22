@@ -8,8 +8,10 @@ Le dechiffrement/chiffrement est entierement la responsabilite de vault.py.
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -17,6 +19,54 @@ from typing import Optional
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Audit B2 : le mode WAL de SQLite est documente par SQLite lui-meme comme
+# potentiellement peu fiable sur certains systemes de fichiers reseau (le
+# verrouillage de fichier necessaire a la coordination entre le fichier
+# principal et le fichier -wal n'est pas garanti par tous les protocoles/
+# configurations reseau) - un risque de corruption trop grave pour le gain
+# de performance qu'apporte WAL. _data_dir() (gui.py) pointe vers
+# %APPDATA%\Coffre, presque toujours un disque local, SAUF sur un poste
+# avec un profil itinerant (roaming profile) impose par une politique de
+# groupe d'entreprise, ou %APPDATA% est physiquement un partage reseau.
+DRIVE_REMOTE = 4  # valeur retournee par GetDriveTypeW pour un lecteur reseau mappe
+
+
+def _is_network_path(path: Path) -> bool:
+    """Detecte si `path` reside probablement sur un emplacement reseau
+    (partage UNC \\\\serveur\\partage\\... ou lettre de lecteur mappee sur
+    un partage reseau) plutot qu'un disque local.
+
+    Deux cas geres :
+    1. Chemin UNC direct ou "a longueur etendue" (\\\\?\\UNC\\serveur\\...) -
+       reconnu par simple prefixe, aucun appel systeme necessaire.
+    2. Lettre de lecteur (C:, Z:...) : interrogee via l'API Windows
+       GetDriveTypeW, qui distingue un disque local (DRIVE_FIXED) d'un
+       lecteur reseau mappe (DRIVE_REMOTE) - Path seul ne peut pas faire
+       cette distinction, une lettre de lecteur a la meme forme dans les
+       deux cas.
+
+    Best-effort : toute erreur (plateforme non-Windows, API absente...)
+    est traitee comme "pas un chemin reseau" plutot que de faire planter
+    l'ouverture du coffre pour une simple heuristique de detection."""
+    try:
+        raw = str(path)
+        if raw.startswith("\\\\"):
+            # \\?\UNC\serveur\partage\... est un chemin reseau ; \\?\C:\...
+            # (prefixe de chemin etendu pour depasser MAX_PATH) reste un
+            # disque local malgre le double antislash initial.
+            if raw.startswith("\\\\?\\"):
+                return raw[4:].upper().startswith("UNC\\")
+            return True
+        if sys.platform == "win32":
+            drive = path.drive
+            if drive:
+                drive_type = ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\")
+                return drive_type == DRIVE_REMOTE
+    except Exception:
+        pass
+    return False
 
 
 class Database:
@@ -28,16 +78,27 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(path))
         self.conn.row_factory = sqlite3.Row
-        # Mode WAL : les ecritures (add_entry/update_entry, appelees a
-        # chaque frappe validee dans la GUI) commitent dans un fichier
-        # journal a part (-wal) plutot que d'ecrire directement dans la
-        # base et d'attendre un fsync() disque complet a chaque commit -
-        # mesure a l'audit : facteur ~8x sur des insertions unitaires
-        # (8.20ms/ligne en mode par defaut contre 1.00ms/ligne en WAL).
+        # Audit B2 : le mode WAL n'est active que si le fichier ne semble
+        # PAS resider sur un emplacement reseau (voir _is_network_path) -
+        # sur un profil itinerant d'entreprise (%APPDATA% redirige vers un
+        # partage reseau), WAL reste desactive et SQLite utilise son mode
+        # journal par defaut (rollback journal), plus lent mais dont le
+        # verrouillage est mieux supporte sur ce type de systeme de
+        # fichiers. is_network_storage est expose pour permettre a
+        # l'appelant (gui.py) d'en informer l'utilisateur s'il le souhaite.
+        self.is_network_storage = _is_network_path(self.path)
+        if not self.is_network_storage:
+            # Les ecritures (add_entry/update_entry, appelees a chaque
+            # frappe validee dans la GUI) commitent dans un fichier journal
+            # a part (-wal) plutot que d'ecrire directement dans la base et
+            # d'attendre un fsync() disque complet a chaque commit - mesure
+            # a l'audit : facteur ~8x sur des insertions unitaires (8.20ms/
+            # ligne en mode par defaut contre 1.00ms/ligne en WAL).
+            self.conn.execute("PRAGMA journal_mode=WAL")
         # busy_timeout evite une SQLITE_BUSY immediate si une seconde
         # connexion (ex: backup_to, qui en ouvre une le temps de la copie)
-        # detient bien le fichier au meme instant.
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        # detient bien le fichier au meme instant - utile quel que soit le
+        # mode journal actif.
         self.conn.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
         self._migrate_legacy_kdf_columns()

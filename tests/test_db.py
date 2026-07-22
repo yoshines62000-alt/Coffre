@@ -6,9 +6,11 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import db
 from db import Database
 
 
@@ -301,6 +303,85 @@ class EntriesTestCase(unittest.TestCase):
         self.addCleanup(reopened.close)
         self.assertEqual(reopened.get_entry(entry_id)["ciphertext"], b"cipher-persistant")
         self.assertEqual(reopened.get_vault_meta()["kdf_salt"], b"sel-persistant")
+
+
+class NetworkPathDetectionTestCase(unittest.TestCase):
+    """Audit B2 : le mode WAL de SQLite est documente par SQLite lui-meme
+    comme peu fiable sur certains systemes de fichiers reseau - db._is_
+    network_path() detecte ce cas pour que Database.__init__ desactive WAL
+    en consequence (voir WalDisabledOnNetworkPathTestCase plus bas)."""
+
+    def test_detects_a_direct_unc_path(self):
+        self.assertTrue(db._is_network_path(Path(r"\\serveur\partage\coffre.sqlite")))
+
+    def test_detects_an_extended_length_unc_path(self):
+        self.assertTrue(db._is_network_path(Path(r"\\?\UNC\serveur\partage\coffre.sqlite")))
+
+    def test_does_not_flag_an_extended_length_local_path(self):
+        # Le prefixe \\?\ (chemin "a longueur etendue", pour depasser
+        # MAX_PATH) commence lui aussi par un double antislash, mais
+        # \\?\C:\... reste un disque local - seul \\?\UNC\... designe un
+        # partage reseau.
+        self.assertFalse(db._is_network_path(Path(r"\\?\C:\Users\test\coffre.sqlite")))
+
+    def test_does_not_flag_an_ordinary_local_drive_letter_path(self):
+        self.assertFalse(db._is_network_path(Path(r"C:\Users\test\coffre.sqlite")))
+
+    def test_does_not_flag_an_ordinary_local_temp_path(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.assertFalse(db._is_network_path(tmp / "coffre.sqlite"))
+
+
+class WalDisabledOnNetworkPathTestCase(unittest.TestCase):
+    """Audit B2 : sur un chemin detecte comme reseau (profil itinerant
+    d'entreprise, ou %APPDATA% est un partage reseau), Database doit
+    renoncer au mode WAL plutot que de risquer la corruption documentee
+    par SQLite lui-meme sur ce type de systeme de fichiers."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_wal_is_disabled_when_the_path_is_detected_as_a_network_path(self):
+        with patch.object(db, "_is_network_path", return_value=True):
+            database = Database(self.tmp / "reseau.sqlite")
+        self.addCleanup(database.close)
+        mode = database.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertNotEqual(mode.lower(), "wal")
+        self.assertTrue(database.is_network_storage)
+
+    def test_wal_stays_enabled_for_an_ordinary_local_path(self):
+        # Non-regression de B1 : le chemin normal (immense majorite des
+        # utilisateurs) doit continuer de beneficier de WAL.
+        database = Database(self.tmp / "local.sqlite")
+        self.addCleanup(database.close)
+        self.assertFalse(database.is_network_storage)
+        mode = database.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
+
+    def test_busy_timeout_stays_active_even_when_wal_is_disabled(self):
+        # busy_timeout protege contre un SQLITE_BUSY immediat (ex:
+        # backup_to qui ouvre une seconde connexion) independamment du
+        # mode journal actif.
+        with patch.object(db, "_is_network_path", return_value=True):
+            database = Database(self.tmp / "reseau2.sqlite")
+        self.addCleanup(database.close)
+        timeout = database.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(timeout, 5000)
+
+    def test_the_database_still_works_normally_with_wal_disabled(self):
+        # Le repli sur le mode journal par defaut ne doit rien casser du
+        # cote fonctionnel (CRUD, sauvegarde) - juste desactiver WAL.
+        with patch.object(db, "_is_network_path", return_value=True):
+            database = Database(self.tmp / "reseau3.sqlite")
+        self.addCleanup(database.close)
+        database.set_vault_meta(b"sel", b"nonce", b"cipher")
+        entry_id = database.add_entry(b"nonce-entree", b"cipher-entree")
+        self.assertEqual(database.get_entry(entry_id)["ciphertext"], b"cipher-entree")
+        dest = self.tmp / "reseau3-copie.sqlite"
+        database.backup_to(dest)
+        copy = Database(dest)
+        self.addCleanup(copy.close)
+        self.assertEqual(copy.get_entry(entry_id)["ciphertext"], b"cipher-entree")
 
 
 if __name__ == "__main__":

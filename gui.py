@@ -5,6 +5,7 @@ aucun cloud, aucune synchronisation."""
 from __future__ import annotations
 
 import ctypes
+import os
 import queue
 import sqlite3
 import sys
@@ -32,6 +33,12 @@ AUTO_LOCK_SECONDS = 300
 # reel qui reste declenche par _check_auto_lock au bout de AUTO_LOCK_SECONDS.
 AUTO_LOCK_WARNING_SECONDS = 30
 CLIPBOARD_CLEAR_SECONDS = 20
+# Audit J1 : delai d'anti-rebond (debounce) du champ de recherche - voir
+# CoffreApp._on_search_changed. Choisi assez court pour rester
+# imperceptible a l'usage (l'utilisateur ne remarque pas de delai apres
+# avoir fini de taper) mais suffisant pour absorber une frappe rapide
+# normale (plusieurs caracteres par seconde) en un seul rafraichissement.
+SEARCH_DEBOUNCE_MS = 200
 
 # Police explicite pour tout label de texte normal (noir). Constate a la
 # verification visuelle et isole en dehors de tout code Coffre : un
@@ -60,7 +67,22 @@ def _resource_path(relative: str) -> Path:
 
 
 def _data_dir() -> Path:
-    return Path.home() / "AppData" / "Roaming" / "Coffre"
+    # Audit B3 : resout explicitement via la variable d'environnement
+    # %APPDATA% - celle que Windows expose lui-meme et que l'Explorateur/
+    # les autres applications utilisent - plutot que de la reconstruire a
+    # partir de Path.home() (qui resout via %USERPROFILE% sous Windows).
+    # Les deux chemins coincident dans l'immense majorite des cas, mais
+    # peuvent diverger sur une machine geree en entreprise ou %APPDATA%
+    # est redirige (cle de registre HKCU\...\User Shell Folders\AppData,
+    # pratique de redirection de dossiers en environnement Active
+    # Directory) sans que %USERPROFILE% le soit - Coffre chercherait alors
+    # son coffre au mauvais endroit ("mon coffre a disparu" apres une
+    # migration de machine). Repli sur Path.home() si %APPDATA% est
+    # absente (non-Windows, ou variable supprimee/corrompue) pour ne
+    # jamais empecher le demarrage.
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / "Coffre"
 
 
 def _is_valid_length_input(value: str) -> bool:
@@ -194,6 +216,16 @@ class CoffreApp:
         # l'API de theming Windows), visuellement tres proche du rendu
         # natif "vista". Voir aussi BODY_FONT plus haut pour le contexte
         # complet du bug de rendu constate sur cet environnement.
+        #
+        # Audit C8 : quel que soit le theme ttk choisi ici, Tkinter/ttk
+        # n'expose de facon fiable aucune information d'accessibilite
+        # (roles/labels vers Microsoft UI Automation) sur AUCUN theme -
+        # limitation structurelle de la pile Tkinter elle-meme, pas un
+        # defaut introduit par ce choix de theme precis, et sans correctif
+        # de code realiste a court terme compte tenu du choix technologique
+        # deja fait pour l'ensemble de l'outil. Documente honnetement dans
+        # le README (section "Limites connues") plutot que de laisser un
+        # utilisateur dependant d'un lecteur d'ecran le decouvrir seul.
         ttk.Style(self.root).theme_use("alt")
 
         try:
@@ -213,6 +245,11 @@ class CoffreApp:
             raise SystemExit(1)
         self._clipboard_pending_value = None
         self._auto_lock_job = None
+        # Audit J1 : id retourne par root.after() pour le rafraichissement
+        # differe (anti-rebond) de la liste apres une frappe dans le champ
+        # de recherche - voir _on_search_changed. None quand aucun
+        # rafraichissement n'est en attente.
+        self._search_debounce_job = None
         self._last_activity = time.monotonic()
         self._selected_entry_id = None
         # Tout Toplevel ouvert (edition d'entree, generateur, changement de
@@ -495,7 +532,14 @@ class CoffreApp:
         self.search_var = StringVar()
         search_entry = ttk.Entry(top, textvariable=self.search_var, width=30)
         search_entry.pack(side=LEFT, padx=5)
-        self.search_var.trace_add("write", lambda *_: self._refresh_entries())
+        # Reconstruit a chaque appel de _build_vault_screen (nouveau
+        # search_var) : un job herite d'un ecran precedent n'a plus de
+        # sens ici, meme si _lock_vault/_on_close l'annulent normalement
+        # deja avant qu'on puisse revenir jusqu'ici.
+        if self._search_debounce_job is not None:
+            self.root.after_cancel(self._search_debounce_job)
+            self._search_debounce_job = None
+        self.search_var.trace_add("write", self._on_search_changed)
         ttk.Button(top, text="Verrouiller maintenant", command=self._lock_vault).pack(side=RIGHT)
 
         top2 = ttk.Frame(frame)
@@ -522,9 +566,25 @@ class CoffreApp:
 
         columns = ("title", "username", "url")
         self.entries_tree = ttk.Treeview(body, columns=columns, show="headings", height=18)
-        for col, label, width in [("title", "Titre", 200), ("username", "Identifiant", 200), ("url", "Site / URL", 260)]:
+        # Audit C9 : a une largeur de fenetre superieure a la largeur par
+        # defaut (900px, ex. 1400x800), les trois colonnes restaient
+        # figees a leur largeur declaree (200/200/260px), laissant une
+        # bande vide inutilisee a droite avant la scrollbar plutot que
+        # d'occuper l'espace disponible. stretch=False sur Titre/
+        # Identifiant (dont le contenu reste generalement court, inutile
+        # de leur donner plus de place) et stretch=True uniquement sur
+        # Site/URL (dont le contenu - des adresses web - beneficie le
+        # plus d'espace supplementaire) : tout agrandissement de fenetre
+        # au-dela de la largeur par defaut est desormais entierement
+        # absorbe par cette derniere colonne. Verrouille par
+        # TreeviewColumnRedistributionTestCase dans tests/test_gui.py.
+        for col, label, width, stretch in [
+            ("title", "Titre", 200, False),
+            ("username", "Identifiant", 200, False),
+            ("url", "Site / URL", 260, True),
+        ]:
             self.entries_tree.heading(col, text=label)
-            self.entries_tree.column(col, width=width, anchor="w")
+            self.entries_tree.column(col, width=width, anchor="w", stretch=stretch)
         self.entries_tree.bind("<Double-1>", lambda event: self._open_entry_dialog(self._selected_entry_id_from_tree()))
         self.entries_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
@@ -579,6 +639,25 @@ class CoffreApp:
 
     def _on_tree_select(self, event=None):
         self._selected_entry_id = self._selected_entry_id_from_tree()
+
+    def _on_search_changed(self, *_args):
+        # Audit J1 : sans anti-rebond, _refresh_entries() (copie de TOUTES
+        # les entrees en memoire, tri, vidage+reinsertion complete du
+        # Treeview) s'executait a CHAQUE caractere tape - imperceptible
+        # pour un coffre personnel typique (quelques dizaines/centaines
+        # d'entrees), mais une latence de frappe deviendrait sensible pour
+        # un coffre exceptionnellement volumineux. Chaque nouvelle frappe
+        # annule le rafraichissement precedemment programme et en
+        # reprogramme un nouveau : un seul rafraichissement a lieu
+        # finalement, SEARCH_DEBOUNCE_MS apres la DERNIERE frappe d'une
+        # rafale, plutot qu'un par caractere.
+        if self._search_debounce_job is not None:
+            self.root.after_cancel(self._search_debounce_job)
+        self._search_debounce_job = self.root.after(SEARCH_DEBOUNCE_MS, self._debounced_refresh_entries)
+
+    def _debounced_refresh_entries(self):
+        self._search_debounce_job = None
+        self._refresh_entries()
 
     def _refresh_entries(self):
         self.entries_tree.delete(*self.entries_tree.get_children())
@@ -1143,6 +1222,15 @@ class CoffreApp:
         if self._auto_lock_job is not None:
             self.root.after_cancel(self._auto_lock_job)
             self._auto_lock_job = None
+        # Audit J1 : meme raison que pour _auto_lock_job juste au-dessus -
+        # un rafraichissement de recherche differe encore en attente
+        # appellerait _refresh_entries() -> vault.list_entries(), qui leve
+        # VaultError("Le coffre est verrouille.") une fois le coffre
+        # verrouille juste en dessous (non intercepte dans ce callback
+        # after(), donc une erreur Tcl silencieusement avalee au mieux).
+        if self._search_debounce_job is not None:
+            self.root.after_cancel(self._search_debounce_job)
+            self._search_debounce_job = None
         self._close_all_dialogs()
         if hasattr(self, "entries_tree"):
             # Vide la liste affichee (titres/identifiants/URL dechiffres)
@@ -1169,6 +1257,16 @@ class CoffreApp:
             except Exception:
                 pass
             self._update_check_job = None
+        # Audit J1 : meme nettoyage que pour _update_check_job juste
+        # au-dessus - un rafraichissement de recherche differe encore
+        # programme au moment de la fermeture n'a plus aucun widget valide
+        # a rafraichir une fois root detruit.
+        if getattr(self, "_search_debounce_job", None) is not None:
+            try:
+                self.root.after_cancel(self._search_debounce_job)
+            except Exception:
+                pass
+            self._search_debounce_job = None
         # root.destroy() arrete la boucle Tkinter : tout root.after(...)
         # deja programme pour effacer le presse-papier (voir _copy_field)
         # ne s'executera donc jamais si l'app se ferme avant son delai -
