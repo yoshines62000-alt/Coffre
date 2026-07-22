@@ -40,6 +40,7 @@ class Database:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=5000")
         self._create_schema()
+        self._migrate_legacy_kdf_columns()
 
     def close(self) -> None:
         self.conn.close()
@@ -75,13 +76,28 @@ class Database:
             dest_conn.close()
 
     def _create_schema(self) -> None:
+        # kdf_n/kdf_r/kdf_p (audit A2) : les parametres scrypt utilises pour
+        # CE coffre precis, stockes a cote du sel plutot que fixes en dur
+        # cote crypto.py - ce qui permet de faire evoluer les parametres
+        # par defaut d'un coffre a l'autre (voir Vault.create) sans jamais
+        # rendre un coffre deja cree illisible (voir Vault.unlock, qui lit
+        # ces colonnes pour deriver la cle avec les BONS parametres). Le
+        # DEFAULT ci-dessous (65536/8/1) ne sert que de filet pour un INSERT
+        # qui omettrait ces colonnes - le code applicatif (vault.py) les
+        # fournit toujours explicitement. Ce module reste volontairement
+        # ignorant de la cryptographie (voir docstring de fichier) : ces
+        # valeurs sont donc des litteraux, pas des constantes importees de
+        # crypto.py.
         self.conn.executescript("""
         CREATE TABLE IF NOT EXISTS vault_meta (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             kdf_salt BLOB NOT NULL,
             verifier_nonce BLOB NOT NULL,
             verifier_ciphertext BLOB NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            kdf_n INTEGER NOT NULL DEFAULT 65536,
+            kdf_r INTEGER NOT NULL DEFAULT 8,
+            kdf_p INTEGER NOT NULL DEFAULT 1
         );
 
         CREATE TABLE IF NOT EXISTS entries (
@@ -94,6 +110,41 @@ class Database:
         """)
         self.conn.commit()
 
+    def _migrate_legacy_kdf_columns(self) -> None:
+        """Coffres crees avant le correctif d'audit A2 (v1.0.9 et
+        anterieur) : leur table `vault_meta` n'a pas encore les colonnes
+        kdf_n/kdf_r/kdf_p - le `CREATE TABLE IF NOT EXISTS` ci-dessus ne
+        les ajoute que pour une base TOUTE NEUVE, il est silencieusement
+        ignore si la table existe deja avec l'ancien schema.
+
+        Ajoute ces colonnes ici via `ALTER TABLE ... ADD COLUMN ... DEFAULT
+        ...` avec une valeur par defaut EGALE aux anciens parametres scrypt
+        qui etaient fixes en dur dans crypto.py avant ce correctif
+        (65536/8/1, voir crypto.LEGACY_SCRYPT_N/R/P) : SQLite remplit alors
+        automatiquement, sans aucune donnee chiffree a retoucher, la ligne
+        `vault_meta` deja existante (il ne peut y en avoir qu'une, voir
+        CHECK id = 1) avec ces valeurs - exactement les parametres qui ont
+        reellement servi a deriver la cle protegeant ce coffre. C'est ce
+        qui garantit qu'un coffre existant continue de s'ouvrir avec
+        Vault.unlock apres ce correctif, sans intervention de
+        l'utilisateur (voir aussi Vault._migrate_kdf_params pour la mise a
+        niveau transparente vers les parametres courants au deverrouillage
+        suivant).
+
+        Idempotent : verifie d'abord si les colonnes existent deja (via
+        `PRAGMA table_info`) avant de tenter l'ALTER TABLE - indispensable
+        puisque `__init__` (et donc cette methode) s'execute a CHAQUE
+        ouverture du coffre, pas seulement la toute premiere apres la mise
+        a jour ; sans cette verification, la deuxieme ouverture leverait
+        une erreur SQLite ("duplicate column name") et empecherait
+        totalement le demarrage de l'application."""
+        existing_columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(vault_meta)")}
+        if "kdf_n" in existing_columns:
+            return  # deja migre (ou base toute neuve, deja creee avec ces colonnes) : rien a faire
+        for column, default in (("kdf_n", 65536), ("kdf_r", 8), ("kdf_p", 1)):
+            self.conn.execute(f"ALTER TABLE vault_meta ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}")
+        self.conn.commit()
+
     # -- metadonnees du coffre (mot de passe maitre) ---------------------------
 
     def is_initialized(self) -> bool:
@@ -104,18 +155,33 @@ class Database:
     def get_vault_meta(self) -> Optional[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM vault_meta WHERE id = 1").fetchone()
 
-    def set_vault_meta(self, kdf_salt: bytes, verifier_nonce: bytes, verifier_ciphertext: bytes) -> None:
+    def set_vault_meta(
+        self, kdf_salt: bytes, verifier_nonce: bytes, verifier_ciphertext: bytes,
+        kdf_n: int = 65536, kdf_r: int = 8, kdf_p: int = 1,
+    ) -> None:
         """Cree OU remplace entierement les metadonnees du coffre (utilise
         aussi bien a la creation initiale qu'a un changement de mot de passe
-        maitre, ou le sel et le verificateur sont entierement regeneres)."""
+        maitre, ou le sel et le verificateur sont entierement regeneres).
+
+        kdf_n/kdf_r/kdf_p (audit A2) : parametres scrypt reellement utilises
+        pour deriver la cle de CE coffre - stockes ici plutot que fixes en
+        dur cote crypto.py, pour qu'un futur changement des parametres par
+        defaut (crypto.SCRYPT_N) ne rende jamais illisible un coffre deja
+        cree. Valeurs par defaut = anciens parametres (65536/8/1) pour
+        compatibilite avec les appelants qui ne les precisent pas encore ;
+        vault.py les fournit toujours explicitement en pratique."""
         self.conn.execute(
-            """INSERT INTO vault_meta (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at)
-               VALUES (1, ?, ?, ?, ?)
+            """INSERT INTO vault_meta
+                   (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at, kdf_n, kdf_r, kdf_p)
+               VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    kdf_salt = excluded.kdf_salt,
                    verifier_nonce = excluded.verifier_nonce,
-                   verifier_ciphertext = excluded.verifier_ciphertext""",
-            (kdf_salt, verifier_nonce, verifier_ciphertext, _now_iso()),
+                   verifier_ciphertext = excluded.verifier_ciphertext,
+                   kdf_n = excluded.kdf_n,
+                   kdf_r = excluded.kdf_r,
+                   kdf_p = excluded.kdf_p""",
+            (kdf_salt, verifier_nonce, verifier_ciphertext, _now_iso(), kdf_n, kdf_r, kdf_p),
         )
         self.conn.commit()
 
@@ -149,15 +215,18 @@ class Database:
 
     def replace_all_entries_and_meta(
         self, entries: list, kdf_salt: bytes, verifier_nonce: bytes, verifier_ciphertext: bytes,
+        kdf_n: int = 65536, kdf_r: int = 8, kdf_p: int = 1,
     ) -> None:
         """Remplace atomiquement le contenu chiffre de TOUTES les entrees ET
-        les metadonnees du coffre (sel, verificateur) en une seule
-        transaction - utilise exclusivement lors d'un changement de mot de
-        passe maitre. Les deux doivent reussir ou echouer ENSEMBLE : si les
-        entrees etaient re-chiffrees avec la nouvelle cle mais que
-        vault_meta gardait l'ancien sel/verificateur (ou l'inverse), le
-        coffre entier deviendrait irrecuperable (aucun mot de passe,
-        ancien ou nouveau, ne permettrait plus de le dechiffrer).
+        les metadonnees du coffre (sel, verificateur, parametres KDF) en une
+        seule transaction - utilise lors d'un changement de mot de passe
+        maitre ET lors de la migration transparente des parametres scrypt
+        (audit A2, voir Vault._migrate_kdf_params). Tout doit reussir ou
+        echouer ENSEMBLE : si les entrees etaient re-chiffrees avec la
+        nouvelle cle mais que vault_meta gardait l'ancien sel/verificateur/
+        parametres (ou l'inverse), le coffre entier deviendrait
+        irrecuperable (aucun mot de passe, ancien ou nouveau, ne
+        permettrait plus de le dechiffrer).
         `entries` : liste de (id, nonce, ciphertext)."""
         try:
             for entry_id, nonce, ciphertext in entries:
@@ -166,13 +235,17 @@ class Database:
                     (nonce, ciphertext, _now_iso(), entry_id),
                 )
             self.conn.execute(
-                """INSERT INTO vault_meta (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at)
-                   VALUES (1, ?, ?, ?, ?)
+                """INSERT INTO vault_meta
+                       (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at, kdf_n, kdf_r, kdf_p)
+                   VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        kdf_salt = excluded.kdf_salt,
                        verifier_nonce = excluded.verifier_nonce,
-                       verifier_ciphertext = excluded.verifier_ciphertext""",
-                (kdf_salt, verifier_nonce, verifier_ciphertext, _now_iso()),
+                       verifier_ciphertext = excluded.verifier_ciphertext,
+                       kdf_n = excluded.kdf_n,
+                       kdf_r = excluded.kdf_r,
+                       kdf_p = excluded.kdf_p""",
+                (kdf_salt, verifier_nonce, verifier_ciphertext, _now_iso(), kdf_n, kdf_r, kdf_p),
             )
         except Exception:
             self.conn.rollback()

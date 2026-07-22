@@ -4,6 +4,7 @@ aucun cloud, aucune synchronisation."""
 
 from __future__ import annotations
 
+import ctypes
 import queue
 import sqlite3
 import sys
@@ -17,7 +18,7 @@ from tkinter import (
 )
 
 import update_checker
-from vault import Vault, VaultError, generate_password, password_strength
+from vault import MIN_MASTER_PASSWORD_LENGTH, Vault, VaultError, generate_password, password_strength
 
 APP_TITLE = "Coffre"
 DONATE_URL = "https://ko-fi.com/yoshines62000"
@@ -46,6 +47,12 @@ CLIPBOARD_CLEAR_SECONDS = 20
 # les met dans un contexte graphique distinct et evite le bug.
 BODY_FONT = ("Segoe UI", 10)
 
+# Couleur associee a chaque score de password_strength (0 = tres faible, 4
+# = tres fort) - partagee entre tous les indicateurs de solidite de
+# l'interface (dialogue d'ajout d'entree, creation du coffre, changement
+# de mot de passe maitre) plutot que redefinie a chaque endroit.
+_STRENGTH_COLORS = {0: "#B00020", 1: "#B00020", 2: "#B37B00", 3: "#1B7A1B", 4: "#1B7A1B"}
+
 
 def _resource_path(relative: str) -> Path:
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
@@ -65,6 +72,107 @@ def _is_valid_length_input(value: str) -> bool:
     filet de securite dans do_generate pour les cas non couverts par cette
     seule validation (ex. champ laisse vide)."""
     return value == "" or value.isdigit()
+
+
+# Audit A11 : `clipboard_clear()`/`clipboard_append()` (Tk standard) posent
+# uniquement CF_UNICODETEXT sur le presse-papier "courant", que Coffre sait
+# effacer lui-meme apres CLIPBOARD_CLEAR_SECONDS - mais depuis Windows 10
+# 1809, le systeme peut ALSO conserver une copie dans l'historique du
+# presse-papier (Win+V) et la synchroniser vers d'autres appareils du meme
+# compte Microsoft (Cloud Clipboard), tous deux INDEPENDANTS du contenu
+# "courant" que Coffre efface : effacer le presse-papier courant ne les
+# efface pas retroactivement. Windows documente deux formats de
+# presse-papier speciaux pour qu'une application demande explicitement a
+# en etre exclue : "CanIncludeInClipboardHistory" et
+# "CanUploadToCloudClipboard", chacun associe a une valeur DWORD 0 -
+# pattern utilise par plusieurs gestionnaires de mots de passe Windows.
+_CLIPBOARD_EXCLUSION_FORMAT_NAMES = ("CanIncludeInClipboardHistory", "CanUploadToCloudClipboard")
+GMEM_MOVEABLE = 0x0002
+# OpenClipboard echoue (ERROR_ACCESS_DENIED) si un AUTRE processus le
+# detient au meme instant - frequent et attendu : le presse-papier est une
+# ressource globale a tout Windows, et d'autres processus (navigateurs,
+# gestionnaires de presse-papier tiers, et - ironie du sort - le service
+# d'historique du presse-papier lui-meme, qui l'ouvre brievement a CHAQUE
+# changement pour l'inspecter) l'ouvrent et le referment en permanence,
+# generalement en quelques millisecondes. Constate empiriquement pendant
+# le developpement de ce correctif : sans nouvelle tentative, cet echec
+# transitoire empechait l'exclusion de fonctionner de facon fiable des que
+# le presse-papier changeait frequemment (ex: plusieurs copies rapprochees
+# depuis Coffre) - une poignee de tentatives avec une tres courte pause
+# suffit dans la pratique.
+_OPEN_CLIPBOARD_MAX_ATTEMPTS = 10
+_OPEN_CLIPBOARD_RETRY_DELAY_SECONDS = 0.03
+
+
+def _exclude_current_clipboard_from_history_and_sync() -> None:
+    """Marque le contenu ACTUEL du presse-papier Windows (deja pose par un
+    appel a root.clipboard_append juste avant) comme exclu de l'historique
+    du presse-papier (Win+V) et du Cloud Clipboard, en enregistrant puis en
+    posant les deux formats speciaux ci-dessus - sans jamais toucher au
+    texte lui-meme (CF_UNICODETEXT), donc sans EmptyClipboard : on
+    reouvre le presse-papier deja rempli par Tk pour y AJOUTER ces deux
+    formats supplementaires, jamais pour le vider.
+
+    Ne fait rien sur toute plateforme non-Windows. Best-effort et
+    entierement silencieux en cas d'echec persistant (API absente sur une
+    tres vieille version de Windows...) : un echec ici ne doit jamais
+    empecher ni alterer la copie du texte lui-meme, qui reste la garantie
+    principale et fonctionne independamment de cette exclusion
+    best-effort. Nouvelle tentative en cas d'echec TRANSITOIRE
+    d'OpenClipboard (voir _OPEN_CLIPBOARD_MAX_ATTEMPTS)."""
+    if sys.platform != "win32":
+        return
+    try:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+        user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+        user32.OpenClipboard.restype = ctypes.c_int
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.CloseClipboard.restype = ctypes.c_int
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+
+        opened = False
+        for attempt in range(_OPEN_CLIPBOARD_MAX_ATTEMPTS):
+            if user32.OpenClipboard(None):
+                opened = True
+                break
+            if attempt < _OPEN_CLIPBOARD_MAX_ATTEMPTS - 1:
+                time.sleep(_OPEN_CLIPBOARD_RETRY_DELAY_SECONDS)
+        if not opened:
+            return
+        try:
+            for format_name in _CLIPBOARD_EXCLUSION_FORMAT_NAMES:
+                fmt = user32.RegisterClipboardFormatW(format_name)
+                if not fmt:
+                    continue
+                handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, ctypes.sizeof(ctypes.c_uint32))
+                if not handle:
+                    continue
+                ptr = kernel32.GlobalLock(handle)
+                if not ptr:
+                    kernel32.GlobalFree(handle)
+                    continue
+                zero_dword = ctypes.c_uint32(0)  # DWORD 0 = exclure
+                ctypes.memmove(ptr, ctypes.byref(zero_dword), ctypes.sizeof(zero_dword))
+                kernel32.GlobalUnlock(handle)
+                if not user32.SetClipboardData(fmt, handle):
+                    kernel32.GlobalFree(handle)
+                    # SetClipboardData a echoue : `handle` n'a PAS ete pris
+                    # en charge par le systeme, c'est a nous de le liberer.
+                    # Sinon (succes), le systeme devient proprietaire de
+                    # `handle` et le liberera lui-meme - ne plus y toucher.
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        pass
 
 
 class CoffreApp:
@@ -179,7 +287,34 @@ class CoffreApp:
         ttk.Label(frame, text="Nouveau mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
         self._create_password_var = StringVar()
         entry1 = ttk.Entry(frame, textvariable=self._create_password_var, show="*", width=32)
-        entry1.pack(pady=(0, 8))
+        entry1.pack(pady=(0, 2))
+
+        # Audit A3 : le mot de passe maitre est l'unique secret protegeant
+        # tout le coffre, or aucun indicateur de solidite ne lui etait
+        # applique (contrairement aux mots de passe d'entrees ordinaires,
+        # voir _open_entry_dialog) - meme pattern ici (trace_add sur la
+        # StringVar). Pas de retrait de trace necessaire : ce sous-ecran
+        # est construit UNE SEULE FOIS et jamais detruit pour toute la
+        # duree de vie de l'application (voir commentaire de section
+        # ci-dessus), contrairement au dialogue d'ajout d'entree qui peut
+        # etre ouvert/ferme un nombre illimite de fois.
+        create_strength_var = StringVar()
+        create_strength_label = ttk.Label(frame, textvariable=create_strength_var, font=BODY_FONT)
+        create_strength_label.pack(anchor="w", pady=(0, 6))
+
+        def update_create_strength(*_args):
+            pw = self._create_password_var.get()
+            if not pw:
+                create_strength_var.set(f"Au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres.")
+                create_strength_label.configure(foreground="#666")
+                return
+            strength = password_strength(pw)
+            create_strength_var.set(f"Solidite : {strength['label']}")
+            create_strength_label.configure(foreground=_STRENGTH_COLORS[strength["score"]])
+
+        self._create_password_var.trace_add("write", update_create_strength)
+        update_create_strength()
+
         self._create_confirm_var = StringVar()
         ttk.Label(frame, text="Confirmer le mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
         entry2 = ttk.Entry(frame, textvariable=self._create_confirm_var, show="*", width=32)
@@ -471,7 +606,6 @@ class CoffreApp:
         strength_var = StringVar()
         strength_label = ttk.Label(dialog, textvariable=strength_var, font=BODY_FONT)
         strength_label.grid(row=3, column=2, sticky="w", padx=(5, 10), pady=(2, 0))
-        _STRENGTH_COLORS = {0: "#B00020", 1: "#B00020", 2: "#B37B00", 3: "#1B7A1B", 4: "#1B7A1B"}
 
         def update_strength(*_args):
             strength = password_strength(password_var.get())
@@ -595,6 +729,12 @@ class CoffreApp:
         value = entry[field]
         self.root.clipboard_clear()
         self.root.clipboard_append(value)
+        # Audit A11 : exclut ce contenu de l'historique du presse-papier
+        # Windows (Win+V) et du Cloud Clipboard - sans cette exclusion,
+        # l'effacement automatique CLIPBOARD_CLEAR_SECONDS plus bas ne
+        # protege que le presse-papier "courant", pas la copie que Windows
+        # peut avoir conservee de son cote.
+        _exclude_current_clipboard_from_history_and_sync()
         self._clipboard_pending_value = value
         self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, lambda: self._maybe_clear_clipboard(value))
 
@@ -677,6 +817,7 @@ class CoffreApp:
                 return
             self.root.clipboard_clear()
             self.root.clipboard_append(result_var.get())
+            _exclude_current_clipboard_from_history_and_sync()  # voir _copy_field, audit A11
             self._clipboard_pending_value = result_var.get()
             self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, lambda v=result_var.get(): self._maybe_clear_clipboard(v))
 
@@ -822,9 +963,42 @@ class CoffreApp:
         ttk.Label(dialog, text="Mot de passe actuel", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         ttk.Entry(dialog, textvariable=current_var, show="*", width=32).grid(row=0, column=1, padx=10, pady=(10, 0))
         ttk.Label(dialog, text="Nouveau mot de passe", foreground="black", font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
-        ttk.Entry(dialog, textvariable=new_var, show="*", width=32).grid(row=1, column=1, padx=10, pady=(5, 0))
+        new_entry = ttk.Entry(dialog, textvariable=new_var, show="*", width=32)
+        new_entry.grid(row=1, column=1, padx=10, pady=(5, 0))
         ttk.Label(dialog, text="Confirmer le nouveau", foreground="black", font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=confirm_var, show="*", width=32).grid(row=2, column=1, padx=10, pady=(5, 0))
+
+        # Audit A3 : meme indicateur de solidite que sur l'ecran de
+        # creation du coffre et le dialogue d'ajout d'entree, applique ici
+        # au NOUVEAU mot de passe maitre. Contrairement a l'ecran de
+        # creation (construit une seule fois, jamais detruit), ce dialogue
+        # est un Toplevel qu'on peut ouvrir/fermer un nombre illimite de
+        # fois : le retrait de la trace au <Destroy> de new_entry est donc
+        # necessaire, exactement comme pour password_var dans
+        # _open_entry_dialog (voir son commentaire detaille), pour ne pas
+        # garder le nouveau mot de passe en clair vivant indefiniment dans
+        # l'interprete apres la fermeture du dialogue.
+        strength_var = StringVar()
+        strength_label = ttk.Label(dialog, textvariable=strength_var, font=BODY_FONT)
+        strength_label.grid(row=1, column=2, sticky="w", padx=(5, 10), pady=(5, 0))
+
+        def update_strength(*_args):
+            pw = new_var.get()
+            if not pw:
+                strength_var.set(f"Au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres.")
+                strength_label.configure(foreground="#666")
+                return
+            strength = password_strength(pw)
+            strength_var.set(f"Solidite : {strength['label']}")
+            strength_label.configure(foreground=_STRENGTH_COLORS[strength["score"]])
+
+        strength_trace_id = new_var.trace_add("write", update_strength)
+        update_strength()
+
+        def remove_strength_trace(event=None):
+            new_var.trace_remove("write", strength_trace_id)
+
+        new_entry.bind("<Destroy>", remove_strength_trace, add="+")
 
         def on_save():
             if new_var.get() != confirm_var.get():

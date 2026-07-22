@@ -30,13 +30,40 @@ SALT_SIZE = 16
 NONCE_SIZE = 12
 KEY_SIZE = 32  # AES-256
 
-# Parametres scrypt : n=2**16 (~65 ms sur un PC recent) est un compromis
-# deliberement cote "assez lent pour couter cher a un attaquant qui essaie
-# des mots de passe en masse", tout en restant imperceptible pour
-# l'utilisateur legitime qui ne le tape qu'une fois par deverrouillage.
-SCRYPT_N = 2**16
+# Parametres scrypt courants : n=2**17 (mesure a l'audit : ~550ms sur une
+# machine de developpement moderne, contre ~276ms pour l'ancien n=2**16 -
+# toujours largement imperceptible pour l'utilisateur legitime qui ne le
+# tape qu'une fois par deverrouillage). Aligne sur la recommandation
+# actuelle de l'OWASP Password Storage Cheat Sheet pour scrypt quand
+# Argon2id n'est pas utilise (minimum n=2**17, r=8, p=1, soit 128 MiB de
+# cout memoire) - l'ancien n=2**16 (64 MiB) etait en dessous de ce minimum
+# (audit constat A2).
+#
+# IMPORTANT - ces constantes ne doivent JAMAIS servir directement a
+# DECHIFFRER un coffre existant : les parametres reellement utilises pour
+# un coffre donne sont stockes AVEC ce coffre (colonnes kdf_n/kdf_r/kdf_p
+# de vault_meta, voir db.py) plutot qu'en dur ici, precisement pour qu'un
+# futur changement de ces valeurs ne rende jamais un coffre deja cree
+# illisible. Elles ne servent que de valeur par defaut pour un NOUVEAU
+# coffre (Vault.create) ou une migration explicite (Vault.unlock /
+# Vault.change_master_password), qui passent alors ces parametres a
+# derive_key de facon explicite.
+SCRYPT_N = 2**17
 SCRYPT_R = 8
 SCRYPT_P = 1
+
+# Anciens parametres scrypt, utilises en dur par tout coffre cree avant ce
+# correctif d'audit (v1.0.9 et anterieur). Necessaires pour continuer a
+# ouvrir un coffre existant qui n'a pas encore ete migre vers ses propres
+# colonnes kdf_n/kdf_r/kdf_p en base (voir
+# db.py::Database._migrate_legacy_kdf_columns, qui remplit automatiquement
+# ces colonnes avec EXACTEMENT ces valeurs pour toute base preexistante -
+# ce sont les parametres reellement employes a la creation de ces coffres,
+# donc les seuls qui permettent encore de les dechiffrer tant qu'une
+# migration transparente n'a pas eu lieu, voir Vault.unlock).
+LEGACY_SCRYPT_N = 2**16
+LEGACY_SCRYPT_R = 8
+LEGACY_SCRYPT_P = 1
 
 
 class DecryptionError(Exception):
@@ -51,11 +78,23 @@ def generate_salt() -> bytes:
     return os.urandom(SALT_SIZE)
 
 
-def derive_key(master_password: str, salt: bytes) -> bytes:
+def derive_key(
+    master_password: str, salt: bytes, n: int = SCRYPT_N, r: int = SCRYPT_R, p: int = SCRYPT_P,
+) -> bytes:
     """Derive une cle AES-256 a partir du mot de passe maitre et d'un sel.
-    Deterministe (meme mot de passe + meme sel = meme cle), condition
-    necessaire pour pouvoir redechiffrer le coffre plus tard."""
-    kdf = Scrypt(salt=salt, length=KEY_SIZE, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P)
+    Deterministe (meme mot de passe + meme sel + memes parametres n/r/p =
+    meme cle), condition necessaire pour pouvoir redechiffrer le coffre
+    plus tard.
+
+    n/r/p sont desormais des parametres explicites (par defaut les valeurs
+    courantes SCRYPT_N/R/P ci-dessus) plutot que des constantes figees a
+    l'interieur de cette fonction : l'appelant (Vault) doit pouvoir
+    deriver une cle avec les parametres REELLEMENT stockes pour un coffre
+    donne (qui peuvent etre les anciens LEGACY_SCRYPT_* pour un coffre pas
+    encore migre), et pas necessairement les parametres courants -
+    correctif de l'audit A2 (compatibilite ascendante : augmenter
+    SCRYPT_N ne doit jamais rendre un coffre existant indechiffrable)."""
+    kdf = Scrypt(salt=salt, length=KEY_SIZE, n=n, r=r, p=p)
     return kdf.derive(master_password.encode("utf-8"))
 
 

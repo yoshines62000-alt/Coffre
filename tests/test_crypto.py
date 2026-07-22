@@ -43,6 +43,58 @@ class DeriveKeyTestCase(unittest.TestCase):
     def test_generate_salt_has_the_expected_length(self):
         self.assertEqual(len(crypto.generate_salt()), crypto.SALT_SIZE)
 
+    def test_scrypt_n_meets_the_current_owasp_minimum(self):
+        # Audit A2 : l'ancien N=2**16 (65536) etait en dessous de la
+        # recommandation actuelle de l'OWASP Password Storage Cheat Sheet
+        # pour scrypt (minimum N=2**17).
+        self.assertGreaterEqual(crypto.SCRYPT_N, 2**17)
+
+    def test_legacy_scrypt_constants_match_the_parameters_used_before_this_fix(self):
+        # Ces valeurs sont figees a dessein : elles doivent rester
+        # identiques aux anciens SCRYPT_N/R/P (avant le correctif d'audit
+        # A2) pour toujours pouvoir dechiffrer un coffre cree avant ce
+        # correctif (voir db.py::_migrate_legacy_kdf_columns et
+        # tests/test_vault.py::KdfBackwardCompatibilityTestCase). Ne JAMAIS
+        # modifier ces constantes.
+        self.assertEqual(crypto.LEGACY_SCRYPT_N, 2**16)
+        self.assertEqual(crypto.LEGACY_SCRYPT_R, 8)
+        self.assertEqual(crypto.LEGACY_SCRYPT_P, 1)
+
+    def test_derive_key_uses_the_current_parameters_by_default(self):
+        salt = crypto.generate_salt()
+        default_key = crypto.derive_key("mot-de-passe-maitre", salt)
+        explicit_key = crypto.derive_key(
+            "mot-de-passe-maitre", salt, n=crypto.SCRYPT_N, r=crypto.SCRYPT_R, p=crypto.SCRYPT_P,
+        )
+        self.assertEqual(default_key, explicit_key)
+
+    def test_derive_key_with_explicit_legacy_parameters_differs_from_the_current_default(self):
+        # Correctif d'audit A2 : derive_key doit pouvoir deriver avec
+        # d'anciens parametres explicites (necessaire pour ouvrir un
+        # coffre existant) - le resultat differe forcement de la
+        # derivation par defaut (parametres courants), meme mot de passe
+        # et meme sel, puisque n/r/p font partie de la fonction de
+        # derivation.
+        salt = crypto.generate_salt()
+        current = crypto.derive_key("mot-de-passe-maitre", salt)
+        legacy = crypto.derive_key(
+            "mot-de-passe-maitre", salt,
+            n=crypto.LEGACY_SCRYPT_N, r=crypto.LEGACY_SCRYPT_R, p=crypto.LEGACY_SCRYPT_P,
+        )
+        self.assertNotEqual(current, legacy)
+
+    def test_derive_key_with_the_same_explicit_parameters_is_deterministic(self):
+        salt = crypto.generate_salt()
+        key1 = crypto.derive_key(
+            "mot-de-passe-maitre", salt,
+            n=crypto.LEGACY_SCRYPT_N, r=crypto.LEGACY_SCRYPT_R, p=crypto.LEGACY_SCRYPT_P,
+        )
+        key2 = crypto.derive_key(
+            "mot-de-passe-maitre", salt,
+            n=crypto.LEGACY_SCRYPT_N, r=crypto.LEGACY_SCRYPT_R, p=crypto.LEGACY_SCRYPT_P,
+        )
+        self.assertEqual(key1, key2)
+
     def test_derive_key_handles_non_ascii_passwords(self):
         # Un mot de passe maitre contenant des accents ou emojis doit se
         # comporter exactement comme n'importe quel autre - aucune

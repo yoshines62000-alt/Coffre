@@ -34,6 +34,16 @@ _ENTRY_FIELDS = ("title", "username", "password", "url", "notes")
 
 AMBIGUOUS_CHARACTERS = "0O1lI"
 
+# Longueur minimale imposee au mot de passe maitre (audit A3) : c'est
+# l'unique secret protegeant l'integralite du coffre, or aucune politique
+# de robustesse ne lui etait appliquee avant ce correctif (un mot de passe
+# maitre d'un seul caractere etait accepte sans le moindre avertissement).
+# 8 caracteres est un minimum raisonnable qui ne bloque pas un utilisateur
+# voulant une phrase courte, tout en ecartant les cas les plus triviaux -
+# le GUI affiche en plus un indicateur de solidite (password_strength) sur
+# ce champ, exactement comme pour les mots de passe d'entrees ordinaires.
+MIN_MASTER_PASSWORD_LENGTH = 8
+
 
 class VaultError(Exception):
     """Erreur d'utilisation du coffre (deja initialise, verrouille, entree
@@ -72,10 +82,14 @@ class Vault:
             raise VaultError("Un coffre existe deja pour ce fichier.")
         if not master_password:
             raise VaultError("Le mot de passe maitre ne peut pas etre vide.")
+        if len(master_password) < MIN_MASTER_PASSWORD_LENGTH:
+            raise VaultError(
+                f"Le mot de passe maitre doit contenir au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres."
+            )
         salt = crypto.generate_salt()
-        key = crypto.derive_key(master_password, salt)
+        key = crypto.derive_key(master_password, salt)  # parametres courants : crypto.SCRYPT_N/R/P
         nonce, ciphertext = crypto.encrypt(key, _VERIFIER_PLAINTEXT)
-        self.db.set_vault_meta(salt, nonce, ciphertext)
+        self.db.set_vault_meta(salt, nonce, ciphertext, crypto.SCRYPT_N, crypto.SCRYPT_R, crypto.SCRYPT_P)
         self._key = key
         self._entries = []
 
@@ -89,18 +103,91 @@ class Vault:
         remonter DecryptionError et bloquer l'acces a TOUTES les autres
         entrees saines - son id reste consultable via
         `corrupted_entry_ids` pour que l'appelant puisse avertir
-        l'utilisateur sans pour autant lui refuser tout le coffre."""
+        l'utilisateur sans pour autant lui refuser tout le coffre.
+
+        Audit A2 - compatibilite ascendante des parametres KDF : la cle est
+        derivee avec les parametres scrypt REELLEMENT stockes pour ce
+        coffre (meta["kdf_n"/"kdf_r"/"kdf_p"], remplis automatiquement par
+        Database._migrate_legacy_kdf_columns avec les anciens parametres
+        pour un coffre cree avant ce correctif) - jamais avec les
+        constantes courantes de crypto.py, qui casseraient le
+        dechiffrement de tout coffre existant si elles ont change depuis
+        sa creation. Une fois le mot de passe verifie correct, si ces
+        parametres sont plus faibles que la recommandation actuelle, une
+        migration transparente les met a niveau (voir
+        _migrate_kdf_params) - c'est la seule occasion possible de le
+        faire, puisque c'est la premiere fois que le mot de passe en clair
+        est disponible pour re-deriver une cle avec un nouveau sel."""
         meta = self.db.get_vault_meta()
         if meta is None:
             raise VaultError("Aucun coffre n'a encore ete cree.")
-        key = crypto.derive_key(master_password, meta["kdf_salt"])
+        meta_keys = meta.keys()
+        kdf_n = meta["kdf_n"] if "kdf_n" in meta_keys else crypto.LEGACY_SCRYPT_N
+        kdf_r = meta["kdf_r"] if "kdf_r" in meta_keys else crypto.LEGACY_SCRYPT_R
+        kdf_p = meta["kdf_p"] if "kdf_p" in meta_keys else crypto.LEGACY_SCRYPT_P
+        key = crypto.derive_key(master_password, meta["kdf_salt"], n=kdf_n, r=kdf_r, p=kdf_p)
         try:
             crypto.decrypt(key, meta["verifier_nonce"], meta["verifier_ciphertext"])
         except crypto.DecryptionError:
             return False
         self._key = key
         self._entries, self.corrupted_entry_ids = self._decrypt_all_entries()
+        if (kdf_n, kdf_r, kdf_p) != (crypto.SCRYPT_N, crypto.SCRYPT_R, crypto.SCRYPT_P):
+            self._migrate_kdf_params(master_password)
         return True
+
+    def _re_encrypt_entries_with(self, key: bytes) -> list:
+        """Rechiffre TOUTES les entrees actuellement en memoire
+        (self._entries - jamais les entrees corrompues, voir
+        _decrypt_all_entries) avec `key`, sans rien ecrire sur disque.
+        Renvoie une liste (id, nonce, ciphertext) prete a etre passee a
+        db.replace_all_entries_and_meta, qui applique le resultat de facon
+        atomique. Facteur commun entre change_master_password (la cle
+        change parce que le mot de passe change) et _migrate_kdf_params (la
+        cle change parce que les parametres KDF changent, meme mot de
+        passe)."""
+        re_encrypted = []
+        for entry in self._entries:
+            nonce, ciphertext = crypto.encrypt(key, json.dumps(
+                {field: entry.get(field, "") for field in _ENTRY_FIELDS}
+            ).encode("utf-8"))
+            re_encrypted.append((entry["id"], nonce, ciphertext))
+        return re_encrypted
+
+    def _migrate_kdf_params(self, master_password: str) -> None:
+        """Met a niveau silencieusement, au premier deverrouillage reussi
+        qui suit une mise a jour de Coffre, les parametres scrypt d'un
+        coffre cree avec d'anciens parametres plus faibles que la
+        recommandation actuelle (audit A2 : voir crypto.SCRYPT_N et
+        crypto.LEGACY_SCRYPT_N). Le mot de passe maitre NE CHANGE PAS :
+        seuls un nouveau sel et de nouveaux parametres KDF sont generes,
+        exactement comme change_master_password (meme mecanisme de
+        reecriture atomique via db.replace_all_entries_and_meta), avec
+        l'ancien et le nouveau mot de passe identiques.
+
+        Best-effort et silencieux par construction : un echec ici (disque
+        plein, coffre en lecture seule, media retire...) ne doit JAMAIS
+        empecher l'appelant d'acceder normalement a son coffre - celui-ci
+        reste parfaitement utilisable avec son ANCIEN sel/parametres, qui
+        continuent de fonctionner (voir unlock, qui a deja verifie le mot
+        de passe et decrypte les entrees AVANT d'appeler cette methode). La
+        migration sera simplement retentee au prochain deverrouillage
+        reussi. db.replace_all_entries_and_meta est deja transactionnelle
+        (rollback integral en cas d'echec partiel, voir sa docstring), donc
+        un echec ici ne laisse jamais le coffre dans un etat intermediaire
+        incoherent."""
+        try:
+            new_salt = crypto.generate_salt()
+            new_key = crypto.derive_key(master_password, new_salt)  # parametres courants
+            re_encrypted = self._re_encrypt_entries_with(new_key)
+            new_verifier_nonce, new_verifier_ciphertext = crypto.encrypt(new_key, _VERIFIER_PLAINTEXT)
+            self.db.replace_all_entries_and_meta(
+                re_encrypted, new_salt, new_verifier_nonce, new_verifier_ciphertext,
+                kdf_n=crypto.SCRYPT_N, kdf_r=crypto.SCRYPT_R, kdf_p=crypto.SCRYPT_P,
+            )
+            self._key = new_key
+        except Exception:
+            pass
 
     def lock(self) -> None:
         self._key = None
@@ -240,15 +327,30 @@ class Vault:
     def change_master_password(self, current_password: str, new_password: str) -> None:
         self._require_unlocked()
         meta = self.db.get_vault_meta()
-        current_key = crypto.derive_key(current_password, meta["kdf_salt"])
+        meta_keys = meta.keys()
+        current_kdf_n = meta["kdf_n"] if "kdf_n" in meta_keys else crypto.LEGACY_SCRYPT_N
+        current_kdf_r = meta["kdf_r"] if "kdf_r" in meta_keys else crypto.LEGACY_SCRYPT_R
+        current_kdf_p = meta["kdf_p"] if "kdf_p" in meta_keys else crypto.LEGACY_SCRYPT_P
+        current_key = crypto.derive_key(
+            current_password, meta["kdf_salt"], n=current_kdf_n, r=current_kdf_r, p=current_kdf_p,
+        )
         try:
             crypto.decrypt(current_key, meta["verifier_nonce"], meta["verifier_ciphertext"])
         except crypto.DecryptionError:
             raise VaultError("Le mot de passe actuel est incorrect.")
         if not new_password:
             raise VaultError("Le nouveau mot de passe ne peut pas etre vide.")
+        if len(new_password) < MIN_MASTER_PASSWORD_LENGTH:
+            raise VaultError(
+                f"Le nouveau mot de passe maitre doit contenir au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres."
+            )
 
         new_salt = crypto.generate_salt()
+        # Parametres courants (crypto.SCRYPT_N/R/P) - un changement de mot
+        # de passe maitre est aussi l'occasion de mettre a niveau un coffre
+        # encore sur d'anciens parametres KDF (audit A2), meme si
+        # _migrate_kdf_params ne s'en est pas deja charge a un
+        # deverrouillage precedent.
         new_key = crypto.derive_key(new_password, new_salt)
 
         # Rechiffre TOUTES les entrees avec la nouvelle cle avant d'ecrire
@@ -256,15 +358,13 @@ class Vault:
         # applique ensuite ce resultat et les nouvelles metadonnees en une
         # seule transaction atomique (voir sa docstring : un echec partiel
         # rendrait sinon le coffre entierement irrecuperable).
-        re_encrypted = []
-        for entry in self._entries:
-            nonce, ciphertext = crypto.encrypt(new_key, json.dumps(
-                {field: entry.get(field, "") for field in _ENTRY_FIELDS}
-            ).encode("utf-8"))
-            re_encrypted.append((entry["id"], nonce, ciphertext))
+        re_encrypted = self._re_encrypt_entries_with(new_key)
 
         new_verifier_nonce, new_verifier_ciphertext = crypto.encrypt(new_key, _VERIFIER_PLAINTEXT)
-        self.db.replace_all_entries_and_meta(re_encrypted, new_salt, new_verifier_nonce, new_verifier_ciphertext)
+        self.db.replace_all_entries_and_meta(
+            re_encrypted, new_salt, new_verifier_nonce, new_verifier_ciphertext,
+            kdf_n=crypto.SCRYPT_N, kdf_r=crypto.SCRYPT_R, kdf_p=crypto.SCRYPT_P,
+        )
 
         self._key = new_key
         self._entries, self.corrupted_entry_ids = self._decrypt_all_entries()

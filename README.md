@@ -26,6 +26,11 @@ votre machine.
 - **Aucun moyen de récupération** du mot de passe maître : c'est la
   contrepartie inévitable d'un chiffrement réel. S'il est oublié, le coffre
   est définitivement inaccessible.
+- Le mot de passe maître doit contenir **au moins 8 caractères** (indicateur
+  de solidité affiché à la création et au changement de mot de passe).
+- Les paramètres de dérivation (scrypt) sont stockés avec chaque coffre et
+  mis à niveau automatiquement, sans action de votre part, si une nouvelle
+  version de Coffre en recommande de plus robustes.
 
 ## Fonctionnalités
 
@@ -37,7 +42,8 @@ votre machine.
   ambigus (0/O, 1/l/I).
 - **Copie presse-papier auto-effaçable** : un mot de passe copié est
   automatiquement effacé du presse-papier après 20 secondes (sauf si vous
-  avez déjà copié autre chose entre-temps).
+  avez déjà copié autre chose entre-temps), et exclu de l'historique du
+  presse-papier Windows (Win+V) ainsi que du Cloud Clipboard.
 - **Verrouillage automatique** après 5 minutes d'inactivité.
 - **Changement de mot de passe maître** : re-chiffre l'intégralité du
   coffre de façon atomique (jamais d'état intermédiaire corrompu, même en

@@ -17,6 +17,7 @@ trouves a l'audit :
    AUTO_LOCK_WARNING_SECONDS dernieres secondes avant le verrouillage
    automatique par inactivite, sans jamais retarder ce verrouillage."""
 
+import ctypes
 import sqlite3
 import sys
 import tempfile
@@ -58,6 +59,23 @@ def _find_readonly_entry(widget):
 
 def _find_label_with_text(widget, text):
     return _find_widget(widget, lambda w: w.winfo_class() == "TLabel" and str(w.cget("text")) == text)
+
+
+def _label_display_text(widget):
+    """Texte actuellement affiche par un ttk.Label, qu'il soit fixe
+    (option "text", ce que lit deja _find_label_with_text ci-dessus) ou
+    dynamique (option "textvariable" - "text" seul ne reflete PAS la
+    valeur courante de la variable, il faut la resoudre via Tcl)."""
+    var_name = str(widget.cget("textvariable"))
+    if var_name:
+        return widget.tk.globalgetvar(var_name)
+    return str(widget.cget("text"))
+
+
+def _find_label_with_dynamic_text(widget, text):
+    return _find_widget(
+        widget, lambda w: w.winfo_class() == "TLabel" and _label_display_text(w) == text,
+    )
 
 
 def _is_packed(widget):
@@ -685,6 +703,216 @@ class DiskWriteFailureTestCase(GuiTestCase):
         mock_error.assert_called_once()
         self.assertIn("disk is full", str(mock_error.call_args))
         self.assertEqual(len(self.app.vault.list_entries()), 1, "l'entree ne doit pas avoir disparu de la liste en memoire")
+
+
+class MasterPasswordStrengthIndicatorTestCase(unittest.TestCase):
+    """Correctif audit A3 : le mot de passe maitre (creation du coffre et
+    changement de mot de passe maitre) doit afficher un indicateur de
+    solidite, exactement comme les mots de passe d'entrees ordinaires (deja
+    couvert par password_strength dans _open_entry_dialog)."""
+
+    def setUp(self):
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.addCleanup(self._teardown)
+
+    def _teardown(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _new_app(self):
+        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+            return CoffreApp(self.root)
+
+    def _unlock_into(self, app, password):
+        app._unlock_password_var.set(password)
+        _find_button(app.unlock_frame, "Deverrouiller").invoke()
+        self.root.update()
+        if app._auto_lock_job is not None:
+            self.root.after_cancel(app._auto_lock_job)
+            app._auto_lock_job = None
+
+    def test_creation_screen_shows_a_hint_when_the_field_is_empty(self):
+        app = self._new_app()
+        self.root.update()
+        label = _find_label_with_dynamic_text(
+            app.unlock_frame, f"Au moins {gui.MIN_MASTER_PASSWORD_LENGTH} caracteres.",
+        )
+        self.assertIsNotNone(label)
+
+    def test_creation_screen_strength_indicator_updates_as_you_type(self):
+        app = self._new_app()
+        self.root.update()
+        app._create_password_var.set("xK9$mQ2#pL7@vN4!")
+        self.root.update()
+        label = _find_label_with_dynamic_text(app.unlock_frame, "Solidite : Tres fort")
+        self.assertIsNotNone(label)
+
+    def test_change_password_dialog_shows_a_strength_indicator_for_the_new_password(self):
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mot-de-passe-maitre-actuel")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        self._unlock_into(app, "mot-de-passe-maitre-actuel")
+        self.addCleanup(lambda: app._close_all_dialogs())
+
+        app._open_change_password_dialog()
+        dialog = app._open_dialogs[-1]
+        self.root.update()
+
+        new_entry = dialog.grid_slaves(row=1, column=1)[0]
+        new_entry.insert(0, "xK9$mQ2#pL7@vN4!")
+        self.root.update()
+
+        label = _find_label_with_dynamic_text(dialog, "Solidite : Tres fort")
+        self.assertIsNotNone(label)
+
+    def test_change_password_dialog_shows_a_hint_when_the_new_password_field_is_empty(self):
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mot-de-passe-maitre-actuel")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        self._unlock_into(app, "mot-de-passe-maitre-actuel")
+        self.addCleanup(lambda: app._close_all_dialogs())
+
+        app._open_change_password_dialog()
+        dialog = app._open_dialogs[-1]
+        self.root.update()
+
+        label = _find_label_with_dynamic_text(dialog, f"Au moins {gui.MIN_MASTER_PASSWORD_LENGTH} caracteres.")
+        self.assertIsNotNone(label)
+
+    def test_change_password_dialog_removes_the_strength_trace_on_close(self):
+        # Meme garde-fou que password_var dans _open_entry_dialog (voir son
+        # commentaire) : sans le retrait explicite de la trace au
+        # <Destroy> de new_entry, le callback update_strength (et donc
+        # new_var, qui contient le nouveau mot de passe maitre en clair)
+        # resterait vivant indefiniment dans l'interprete Tcl/Python apres
+        # la fermeture du dialogue.
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mot-de-passe-maitre-actuel")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        self._unlock_into(app, "mot-de-passe-maitre-actuel")
+
+        app._open_change_password_dialog()
+        dialog = app._open_dialogs[-1]
+        self.root.update()
+        new_entry = dialog.grid_slaves(row=1, column=1)[0]
+        var_name = str(new_entry.cget("textvariable"))
+
+        traces_while_open = dialog.tk.call("trace", "info", "variable", var_name)
+        self.assertEqual(len(traces_while_open), 1)
+
+        dialog.destroy()
+        self.root.update()
+
+        try:
+            remaining_traces = self.root.tk.call("trace", "info", "variable", var_name)
+        except tk.TclError:
+            # La variable Tcl elle-meme a disparu avec son dernier
+            # referent Python (new_var) - preuve encore plus forte qu'il
+            # ne reste aucune trace/callback vivant.
+            remaining_traces = ()
+        self.assertEqual(len(remaining_traces), 0)
+
+
+class ClipboardHistoryExclusionTestCase(GuiTestCase):
+    """Correctif audit A11 : une valeur copiee par Coffre doit etre exclue
+    de l'historique du presse-papier Windows (Win+V) et du Cloud Clipboard
+    - l'effacement automatique existant (CLIPBOARD_CLEAR_SECONDS) ne
+    protege que le presse-papier "courant", pas la copie que Windows peut
+    conserver de son cote independamment."""
+
+    def test_copy_field_marks_the_clipboard_as_excluded_from_history_and_sync(self):
+        entry_id = self.app.vault.add_entry("Site X", username="alice", password="secret123")
+        self.app._refresh_entries()
+        self.app.entries_tree.selection_set(str(entry_id))
+        self.root.update()
+
+        with patch("gui._exclude_current_clipboard_from_history_and_sync") as mock_exclude:
+            self.app._copy_field("password")
+            self.root.update()
+
+        mock_exclude.assert_called_once()
+
+    def test_generator_copy_marks_the_clipboard_as_excluded_from_history_and_sync(self):
+        self.app._open_generator_dialog()
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+        copy_button = _find_button(dialog, "Copier")
+
+        with patch("gui._exclude_current_clipboard_from_history_and_sync") as mock_exclude:
+            copy_button.invoke()
+            self.root.update()
+
+        mock_exclude.assert_called_once()
+        dialog.destroy()
+
+    def test_the_exclusion_function_never_raises_and_leaves_the_copied_text_intact(self):
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append("autre-valeur-de-test")
+        self.root.update()
+
+        gui._exclude_current_clipboard_from_history_and_sync()  # ne doit jamais lever
+
+        self.assertEqual(self.app.root.clipboard_get(), "autre-valeur-de-test")
+
+    @unittest.skipUnless(sys.platform == "win32", "API de presse-papier Windows uniquement")
+    def test_the_exclusion_function_marks_the_special_clipboard_formats_as_present(self):
+        # Test d'integration reel (sans mock) : verifie via l'API Windows
+        # elle-meme que le presse-papier courant est effectivement marque
+        # comme exclu, plutot que de se fier uniquement a l'absence
+        # d'exception.
+        #
+        # Le presse-papier Windows est une ressource globale au systeme : la
+        # suite de tests complete cree/detruit un tres grand nombre de
+        # fenetres Tk en tres peu de temps, et cet environnement de test
+        # observe en pratique un autre processus (moniteur de presse-papier)
+        # qui peut le detenir de facon prolongee et imprevisible - un
+        # phenomene d'infrastructure de test, distinct d'un bug de
+        # _exclude_current_clipboard_from_history_and_sync elle-meme
+        # (deja verifiee correcte de facon deterministe via un script
+        # autonome isole pendant le developpement de ce correctif). Ce test
+        # reessaie donc la sequence complete (copie + exclusion + verif
+        # sur les DEUX formats) sur une fenetre de temps bornee plutot que
+        # de ne tenter sa chance qu'une seule fois contre un concurrent
+        # externe hors du controle de Coffre.
+        user32 = ctypes.windll.user32
+        user32.RegisterClipboardFormatW.restype = ctypes.c_uint
+        user32.RegisterClipboardFormatW.argtypes = [ctypes.c_wchar_p]
+
+        deadline = time.monotonic() + 5.0
+        formats_present = False
+        while time.monotonic() < deadline:
+            self.app.root.clipboard_clear()
+            self.app.root.clipboard_append("valeur-de-test-sensible")
+            self.root.update()
+
+            gui._exclude_current_clipboard_from_history_and_sync()
+
+            formats_present = all(
+                user32.IsClipboardFormatAvailable(user32.RegisterClipboardFormatW(format_name))
+                for format_name in gui._CLIPBOARD_EXCLUSION_FORMAT_NAMES
+            )
+            if formats_present:
+                break
+            time.sleep(0.1)
+
+        self.assertTrue(
+            formats_present,
+            "les formats d'exclusion ne sont jamais apparus sur le presse-papier "
+            "dans le delai imparti, malgre plusieurs tentatives",
+        )
 
 
 if __name__ == "__main__":

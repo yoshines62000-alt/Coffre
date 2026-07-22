@@ -46,6 +46,91 @@ class VaultMetaTestCase(unittest.TestCase):
         row_count = self.db.conn.execute("SELECT COUNT(*) FROM vault_meta").fetchone()[0]
         self.assertEqual(row_count, 1)
 
+    def test_set_vault_meta_without_kdf_params_defaults_to_the_legacy_values(self):
+        # Compatibilite des appelants existants (dont ces tests eux-memes)
+        # qui n'ont jamais precise kdf_n/kdf_r/kdf_p (audit A2).
+        self.db.set_vault_meta(b"sel", b"nonce", b"ciphertext")
+        meta = self.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], 65536)
+        self.assertEqual(meta["kdf_r"], 8)
+        self.assertEqual(meta["kdf_p"], 1)
+
+    def test_set_vault_meta_stores_explicit_kdf_params(self):
+        self.db.set_vault_meta(b"sel", b"nonce", b"ciphertext", kdf_n=131072, kdf_r=8, kdf_p=1)
+        meta = self.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], 131072)
+
+
+class LegacyKdfColumnsMigrationTestCase(unittest.TestCase):
+    """Audit A2 : un fichier .sqlite cree par une version de Coffre
+    anterieure a ce correctif n'a pas encore les colonnes
+    kdf_n/kdf_r/kdf_p sur `vault_meta`. Database doit les ajouter toute
+    seule a l'ouverture, sans toucher aux donnees chiffrees existantes, et
+    de facon idempotente (l'ouverture se reproduit a chaque lancement de
+    l'application, pas seulement la premiere fois apres la mise a jour)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "legacy.sqlite"
+        # Reproduit l'ancien schema (avant ce correctif) directement en
+        # sqlite3 brut, sans passer par Database - pour ne pas presupposer
+        # que le code de migration fonctionne deja.
+        import sqlite3
+
+        conn = sqlite3.connect(str(self.path))
+        conn.executescript("""
+        CREATE TABLE vault_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            kdf_salt BLOB NOT NULL,
+            verifier_nonce BLOB NOT NULL,
+            verifier_ciphertext BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nonce BLOB NOT NULL,
+            ciphertext BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+        conn.execute(
+            "INSERT INTO vault_meta (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (b"ancien-sel", b"ancien-nonce", b"ancien-ciphertext", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO entries (nonce, ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            (b"nonce-entree", b"cipher-entree", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        conn.commit()
+        conn.close()
+
+    def test_opening_a_legacy_database_adds_the_kdf_columns_with_legacy_defaults(self):
+        db = Database(self.path)
+        self.addCleanup(db.close)
+        meta = db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], 65536)
+        self.assertEqual(meta["kdf_r"], 8)
+        self.assertEqual(meta["kdf_p"], 1)
+
+    def test_opening_a_legacy_database_does_not_alter_the_existing_encrypted_blobs(self):
+        db = Database(self.path)
+        self.addCleanup(db.close)
+        meta = db.get_vault_meta()
+        self.assertEqual(meta["kdf_salt"], b"ancien-sel")
+        self.assertEqual(meta["verifier_ciphertext"], b"ancien-ciphertext")
+        entries = db.list_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["ciphertext"], b"cipher-entree")
+
+    def test_reopening_a_migrated_database_a_second_time_does_not_raise(self):
+        Database(self.path).close()
+        db_again = Database(self.path)  # ne doit pas lever "duplicate column name"
+        self.addCleanup(db_again.close)
+        meta = db_again.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], 65536)
+
 
 class EntriesTestCase(unittest.TestCase):
     def setUp(self):
@@ -103,6 +188,17 @@ class EntriesTestCase(unittest.TestCase):
         self.assertEqual(meta["kdf_salt"], b"nouveau-sel")
         self.assertEqual(meta["verifier_nonce"], b"nouveau-nonce-meta")
         self.assertEqual(self.db.get_entry(entry_id)["ciphertext"], b"nouveau-cipher")
+
+    def test_replace_all_entries_and_meta_stores_explicit_kdf_params(self):
+        # Utilise par Vault._migrate_kdf_params (audit A2) pour mettre a
+        # niveau les parametres scrypt d'un coffre existant.
+        entry_id = self.db.add_entry(b"nonce", b"cipher")
+        self.db.replace_all_entries_and_meta(
+            [(entry_id, b"n2", b"c2")], b"sel", b"nonce-meta", b"cipher-meta",
+            kdf_n=131072, kdf_r=8, kdf_p=1,
+        )
+        meta = self.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], 131072)
 
     def test_replace_all_entries_and_meta_rolls_back_entirely_on_a_partial_failure(self):
         # Le pire scenario possible pour un changement de mot de passe

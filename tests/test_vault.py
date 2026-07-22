@@ -3,6 +3,7 @@ verrouillage, CRUD des entrees, changement de mot de passe maitre,
 generateur de mot de passe) - sur une vraie base SQLite temporaire et de
 vraies operations cryptographiques (aucun mock de crypto.py)."""
 
+import json
 import os
 import string
 import sys
@@ -12,7 +13,62 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from vault import Vault, VaultError, generate_password, password_strength
+import crypto
+from vault import MIN_MASTER_PASSWORD_LENGTH, Vault, VaultError, generate_password, password_strength
+
+
+def _build_legacy_vault_file(path, master_password, entries):
+    """Construit un fichier .sqlite imitant EXACTEMENT ce qu'une version de
+    Coffre anterieure au correctif d'audit A2 (v1.0.9 et anterieur) aurait
+    produit sur disque : schema `vault_meta` SANS les colonnes
+    kdf_n/kdf_r/kdf_p, sel/verificateur/entrees chiffres avec les anciens
+    parametres scrypt fixes en dur a l'epoque (crypto.LEGACY_SCRYPT_N/R/P).
+    Construit intentionnellement via sqlite3 brut plutot que via
+    Database/Vault (le code ACTUEL) pour ne jamais presupposer que le
+    correctif de compatibilite ascendante fonctionne deja - sinon le test
+    ne prouverait rien.
+    `entries` : liste de dicts {title, username, password, url, notes}."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.executescript("""
+        CREATE TABLE vault_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            kdf_salt BLOB NOT NULL,
+            verifier_nonce BLOB NOT NULL,
+            verifier_ciphertext BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nonce BLOB NOT NULL,
+            ciphertext BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """)
+        salt = crypto.generate_salt()
+        key = crypto.derive_key(
+            master_password, salt,
+            n=crypto.LEGACY_SCRYPT_N, r=crypto.LEGACY_SCRYPT_R, p=crypto.LEGACY_SCRYPT_P,
+        )
+        verifier_nonce, verifier_ciphertext = crypto.encrypt(key, b"coffre-verifier-v1")
+        conn.execute(
+            "INSERT INTO vault_meta (id, kdf_salt, verifier_nonce, verifier_ciphertext, created_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (salt, verifier_nonce, verifier_ciphertext, "2026-01-01T00:00:00+00:00"),
+        )
+        for entry in entries:
+            payload = {field: entry.get(field, "") for field in ("title", "username", "password", "url", "notes")}
+            nonce, ciphertext = crypto.encrypt(key, json.dumps(payload).encode("utf-8"))
+            conn.execute(
+                "INSERT INTO entries (nonce, ciphertext, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (nonce, ciphertext, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class VaultLifecycleTestCase(unittest.TestCase):
@@ -453,6 +509,168 @@ class GeneratePasswordTestCase(unittest.TestCase):
     def test_length_shorter_than_the_number_of_enabled_categories_raises_vault_error(self):
         with self.assertRaises(VaultError):
             generate_password(length=1, use_upper=True, use_lower=True, use_digits=True, use_symbols=True)
+
+
+class MasterPasswordPolicyTestCase(unittest.TestCase):
+    """Audit A3 : le mot de passe maitre est l'unique secret protegeant
+    l'integralite du coffre - il n'existait auparavant aucune longueur
+    minimale ni aucun avertissement dessus, contrairement aux mots de
+    passe d'entrees ordinaires (deja couverts par password_strength)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.vault = Vault(self.tmp / "coffre.sqlite")
+        self.addCleanup(self.vault.close)
+
+    def test_create_rejects_a_master_password_shorter_than_the_minimum(self):
+        with self.assertRaises(VaultError):
+            self.vault.create("a" * (MIN_MASTER_PASSWORD_LENGTH - 1))
+        self.assertFalse(self.vault.exists())
+
+    def test_create_accepts_a_master_password_exactly_at_the_minimum_length(self):
+        self.vault.create("a" * MIN_MASTER_PASSWORD_LENGTH)
+        self.assertTrue(self.vault.exists())
+
+    def test_change_master_password_rejects_a_new_password_shorter_than_the_minimum(self):
+        self.vault.create("mot-de-passe-maitre-valide")
+        with self.assertRaises(VaultError):
+            self.vault.change_master_password(
+                "mot-de-passe-maitre-valide", "a" * (MIN_MASTER_PASSWORD_LENGTH - 1),
+            )
+        # Rejete AVANT toute ecriture : l'ancien mot de passe continue de
+        # fonctionner normalement.
+        self.vault.lock()
+        self.assertTrue(self.vault.unlock("mot-de-passe-maitre-valide"))
+
+    def test_change_master_password_accepts_a_new_password_exactly_at_the_minimum_length(self):
+        self.vault.create("mot-de-passe-maitre-valide")
+        self.vault.change_master_password("mot-de-passe-maitre-valide", "b" * MIN_MASTER_PASSWORD_LENGTH)
+        self.vault.lock()
+        self.assertTrue(self.vault.unlock("b" * MIN_MASTER_PASSWORD_LENGTH))
+
+
+class KdfBackwardCompatibilityTestCase(unittest.TestCase):
+    """Audit A2 : augmenter crypto.SCRYPT_N (durcissement des parametres
+    scrypt vers la recommandation OWASP actuelle) ne doit JAMAIS rendre un
+    coffre deja cree illisible. `_build_legacy_vault_file` construit un
+    fichier fidele a ce qu'une version anterieure au correctif aurait
+    ecrit sur disque ; ces tests verifient que le code ACTUEL (Vault) sait
+    toujours l'ouvrir, et met a niveau ses parametres de facon transparente
+    au premier deverrouillage reussi - sans jamais exiger d'action
+    manuelle de l'utilisateur ni casser l'ancien mot de passe en cours de
+    route."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.path = self.tmp / "coffre-legacy.sqlite"
+        _build_legacy_vault_file(
+            self.path, "mot-de-passe-heritage",
+            [{
+                "title": "Site heritage", "username": "alice", "password": "secret-heritage",
+                "url": "https://x.example", "notes": "note heritee",
+            }],
+        )
+
+    def test_a_legacy_vault_still_unlocks_with_the_correct_password(self):
+        vault = Vault(self.path)
+        self.addCleanup(vault.close)
+        self.assertTrue(vault.unlock("mot-de-passe-heritage"))
+        entries = vault.list_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["title"], "Site heritage")
+        self.assertEqual(entries[0]["password"], "secret-heritage")
+        self.assertEqual(entries[0]["notes"], "note heritee")
+        self.assertEqual(vault.corrupted_entry_ids, [])
+
+    def test_a_legacy_vault_rejects_the_wrong_password_without_migrating(self):
+        vault = Vault(self.path)
+        self.addCleanup(vault.close)
+        self.assertFalse(vault.unlock("mauvais-mot-de-passe"))
+        meta = vault.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], crypto.LEGACY_SCRYPT_N)
+
+    def test_opening_a_legacy_vault_migrates_the_schema_columns_without_error(self):
+        # Database.__init__ (via Vault.__init__) doit ajouter les colonnes
+        # kdf_n/kdf_r/kdf_p a la table vault_meta preexistante sans lever,
+        # et les remplir avec les anciens parametres (65536/8/1) -
+        # exactement ceux reellement utilises pour chiffrer ce fichier.
+        vault = Vault(self.path)
+        self.addCleanup(vault.close)
+        meta = vault.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], crypto.LEGACY_SCRYPT_N)
+        self.assertEqual(meta["kdf_r"], crypto.LEGACY_SCRYPT_R)
+        self.assertEqual(meta["kdf_p"], crypto.LEGACY_SCRYPT_P)
+
+    def test_reopening_a_migrated_vault_file_does_not_raise(self):
+        # La migration de schema (ALTER TABLE ADD COLUMN) s'execute a
+        # CHAQUE ouverture, pas seulement la premiere apres la mise a jour
+        # - doit etre idempotente (sinon la deuxieme ouverture leverait
+        # "duplicate column name" et empecherait tout demarrage ulterieur
+        # de l'application).
+        Vault(self.path).close()
+        vault_again = Vault(self.path)
+        self.addCleanup(vault_again.close)
+        self.assertTrue(vault_again.unlock("mot-de-passe-heritage"))
+
+    def test_a_successful_unlock_transparently_upgrades_the_kdf_parameters(self):
+        vault = Vault(self.path)
+        self.addCleanup(vault.close)
+        self.assertTrue(vault.unlock("mot-de-passe-heritage"))
+        meta = vault.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], crypto.SCRYPT_N)
+        self.assertEqual(meta["kdf_r"], crypto.SCRYPT_R)
+        self.assertEqual(meta["kdf_p"], crypto.SCRYPT_P)
+        self.assertGreater(crypto.SCRYPT_N, crypto.LEGACY_SCRYPT_N)
+
+    def test_the_vault_still_unlocks_with_the_same_password_after_migration(self):
+        vault = Vault(self.path)
+        vault.unlock("mot-de-passe-heritage")
+        vault.close()
+
+        reopened = Vault(self.path)
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.unlock("mot-de-passe-heritage"))
+        entries = reopened.list_entries()
+        self.assertEqual(entries[0]["password"], "secret-heritage")
+
+    def test_migration_does_not_repeat_on_a_later_unlock(self):
+        vault = Vault(self.path)
+        self.assertTrue(vault.unlock("mot-de-passe-heritage"))
+        salt_after_first_unlock = vault.db.get_vault_meta()["kdf_salt"]
+        vault.close()
+
+        reopened = Vault(self.path)
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.unlock("mot-de-passe-heritage"))
+        salt_after_second_unlock = reopened.db.get_vault_meta()["kdf_salt"]
+        # Un sel identique prouve qu'aucune seconde migration (nouveau sel,
+        # nouveau rechiffrement) n'a eu lieu - la premiere a deja amene le
+        # coffre aux parametres courants.
+        self.assertEqual(salt_after_first_unlock, salt_after_second_unlock)
+
+    def test_a_migration_failure_never_prevents_unlocking_with_the_old_parameters(self):
+        # Meme filet que change_master_password
+        # (test_a_storage_failure_during_change_master_password_leaves_the_old_password_working) :
+        # simule un echec disque au moment precis ou la migration ecrirait
+        # son resultat. unlock() doit malgre tout reussir normalement (la
+        # migration est best-effort, voir Vault._migrate_kdf_params), et le
+        # coffre doit rester parfaitement coherent avec ses ANCIENS
+        # parametres.
+        from unittest.mock import patch
+
+        vault = Vault(self.path)
+        self.addCleanup(vault.close)
+        with patch.object(vault.db, "replace_all_entries_and_meta", side_effect=RuntimeError("disque plein")):
+            self.assertTrue(vault.unlock("mot-de-passe-heritage"))
+        entries = vault.list_entries()
+        self.assertEqual(entries[0]["password"], "secret-heritage")
+        meta = vault.db.get_vault_meta()
+        self.assertEqual(meta["kdf_n"], crypto.LEGACY_SCRYPT_N)
+
+        vault.close()
+        reopened = Vault(self.path)
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.unlock("mot-de-passe-heritage"))
 
 
 if __name__ == "__main__":
