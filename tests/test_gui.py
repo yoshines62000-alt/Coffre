@@ -87,6 +87,59 @@ def _is_packed(widget):
     return widget.winfo_manager() == "pack"
 
 
+def _wait_for_real_focus(root, widget, timeout=2.0):
+    """Force et attend que `widget` recoive reellement le focus clavier Tk
+    (pas seulement l'intention enregistree par focus_set()), ou renvoie
+    False au bout de `timeout` secondes.
+
+    Constat de debogage (correctifs C3/C10) : dans cet environnement de
+    test (aucune session de bureau interactive reelle derriere le
+    processus qui execute les tests), une fenetre root.withdraw()'ee -
+    l'etat par defaut de GuiTestCase.setUp - ou une Toplevel qui vient
+    d'etre creee ne recoit jamais le "vrai" focus d'entree Tk tant
+    qu'aucune fenetre de l'application n'a ete effectivement activee par
+    le systeme d'exploitation. focus_set() seul n'y suffit pas : Tk se
+    contente alors de MEMORISER le choix (visible via `focus -lastfor`)
+    sans jamais l'appliquer puisque la fenetre n'a jamais ete
+    mappee/activee - root.focus_get() continue de renvoyer None (ou la
+    racine '.') indefiniment, et un event_generate("<Return>") synthetise
+    sur le widget vise est alors livre a la fenetre reellement active
+    (root, ou rien), jamais au widget attendu - ce qui, avant ce correctif
+    de test, faisait echouer silencieusement (sans aucune exception) les
+    assertions de EnterKeySubmitsFormsTestCase et de
+    test_the_password_field_regains_focus_after_a_wrong_password alors que
+    le code produit (gui.py) lui-meme est correct. root.deiconify() (deja
+    utilise par ActionsColumnLayoutTestCase._resize_to_minsize pour un
+    probleme de geometrie analogue) + focus_force() + un veritable
+    ecoulement de temps reel entre plusieurs root.update() (l'activation
+    de fenetre par l'OS est asynchrone, un seul root.update() immediatement
+    apres focus_force() ne suffit pas de facon fiable) rendent ce
+    comportement reproductible."""
+    root.deiconify()
+    widget.winfo_toplevel().lift()
+    widget.focus_force()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        root.update()
+        if root.focus_get() is widget:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _press_return(root, widget):
+    """Simule une touche Entree reellement recue par `widget` (passe par
+    _wait_for_real_focus ci-dessus, sans quoi l'evenement synthetise ne
+    serait pas livre au bon widget dans cet environnement de test)."""
+    got_focus = _wait_for_real_focus(root, widget)
+    assert got_focus, (
+        f"{widget} n'a jamais recu le focus clavier reel dans le delai "
+        "imparti - environnement de test sans activation de fenetre reelle ?"
+    )
+    widget.event_generate("<Return>")
+    root.update()
+
+
 class GuiTestCase(unittest.TestCase):
     """Base commune : construit une vraie CoffreApp sur un coffre neuf dans
     un dossier temporaire (jamais le vrai dossier AppData/Roaming/Coffre de
@@ -112,6 +165,17 @@ class GuiTestCase(unittest.TestCase):
         if self.app._auto_lock_job is not None:
             self.root.after_cancel(self.app._auto_lock_job)
             self.app._auto_lock_job = None
+        # Audit E3 : meme raison que pour _auto_lock_job juste au-dessus -
+        # le timer de sondage de mise a jour (_poll_update_check) se
+        # reprogramme tant que le thread reseau (jusqu'a 5s de timeout) n'a
+        # rien depose dans la file, et survivait donc frequemment a la
+        # destruction de root en fin de test (erreurs Tcl "invalid command
+        # name" observees a l'audit). Le vrai correctif est cote produit
+        # (_on_close), mais l'annuler aussi ici evite le bruit sur CETTE
+        # instance de Tk() qui n'est jamais fermee via _on_close.
+        if getattr(self.app, "_update_check_job", None) is not None:
+            self.root.after_cancel(self.app._update_check_job)
+            self.app._update_check_job = None
         self.addCleanup(self._teardown)
 
     def _teardown(self):
@@ -122,6 +186,11 @@ class GuiTestCase(unittest.TestCase):
         try:
             if self.app._auto_lock_job is not None:
                 self.root.after_cancel(self.app._auto_lock_job)
+        except Exception:
+            pass
+        try:
+            if getattr(self.app, "_update_check_job", None) is not None:
+                self.root.after_cancel(self.app._update_check_job)
         except Exception:
             pass
         try:
@@ -481,10 +550,11 @@ class ActionsColumnLayoutTestCase(GuiTestCase):
 
 class BlockingOperationFeedbackTestCase(unittest.TestCase):
     """Correctif audit Phase 2 : derive_key (scrypt), utilise par
-    vault.create()/unlock()/change_master_password(), est mesure a ~360ms
-    (le double pour un changement de mot de passe, qui derive l'ancien ET
-    le nouveau) et bloque entierement le thread principal Tkinter pendant
-    ce delai. Avant correctif, aucune retroaction visuelle n'accompagnait
+    vault.create()/unlock()/change_master_password(), est mesure a ~550ms
+    avec les parametres KDF renforces (constat d'audit G5 - ce chiffre a
+    change avec SCRYPT_N, voir crypto.py ; le double pour un changement de
+    mot de passe, qui derive l'ancien ET le nouveau) et bloque entierement
+    le thread principal Tkinter pendant ce delai. Avant correctif, aucune retroaction visuelle n'accompagnait
     ce gel (l'utilisateur ne peut pas savoir si l'app a plante) et rien
     n'empechait un double-clic accidentel de declencher un second calcul
     scrypt en parallele des que le bouton redevenait reactif entre deux
@@ -510,7 +580,14 @@ class BlockingOperationFeedbackTestCase(unittest.TestCase):
 
     def _new_app(self):
         with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            return CoffreApp(self.root)
+            app = CoffreApp(self.root)
+        # Audit E3 : voir le commentaire equivalent dans GuiTestCase.setUp -
+        # cette classe construit ses CoffreApp via sa propre _new_app, sans
+        # passer par GuiTestCase, donc le meme nettoyage y est necessaire.
+        if getattr(app, "_update_check_job", None) is not None:
+            self.root.after_cancel(app._update_check_job)
+            app._update_check_job = None
+        return app
 
     def test_create_button_is_disabled_and_cursor_waits_during_vault_create(self):
         app = self._new_app()
@@ -584,6 +661,40 @@ class BlockingOperationFeedbackTestCase(unittest.TestCase):
         self.assertEqual(str(button.cget("state")), "normal")
         self.assertEqual(str(self.root.cget("cursor")), "")
         self.assertFalse(app.vault.is_unlocked)
+
+    def test_the_password_field_regains_focus_after_a_wrong_password(self):
+        # Correctif audit C10 : sans focus_set() explicite dans la branche
+        # d'echec de on_unlock(), le champ (vide de son contenu incorrect)
+        # perdait le focus apres un mot de passe incorrect - l'utilisateur
+        # devait recliquer dedans avant de pouvoir retaper.
+        pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
+        pre_vault.create("mon-mot-de-passe-maitre")
+        pre_vault.close()
+
+        app = self._new_app()
+        self.root.update()
+        button = _find_button(app.unlock_frame, "Deverrouiller")
+        app._unlock_password_var.set("mot-de-passe-incorrect")
+
+        # Deplace deliberement le focus ailleurs avant l'echec (sur le
+        # bouton lui-meme) : sans ca, le test passerait trivialement si le
+        # focus n'avait simplement jamais bouge de son etat initial. Passe
+        # par _wait_for_real_focus (pas un simple focus_set()) : voir sa
+        # docstring - sans ca root.focus_get() ne refleterait jamais le
+        # deplacement de focus dans cet environnement de test, avant meme
+        # d'atteindre le code sous test.
+        self.assertTrue(
+            _wait_for_real_focus(self.root, button),
+            "le bouton n'a jamais recu le focus reel - impossible de tester le comportement",
+        )
+
+        button.invoke()
+        self.root.update()
+
+        self.assertIs(
+            self.root.focus_get(), app._focus_unlock_entry,
+            "le champ de mot de passe doit reprendre le focus apres un echec de deverrouillage",
+        )
 
     def test_save_button_is_disabled_and_cursor_waits_during_change_master_password(self):
         pre_vault = gui.Vault(self.tmp_dir / "coffre.sqlite")
@@ -725,7 +836,14 @@ class MasterPasswordStrengthIndicatorTestCase(unittest.TestCase):
 
     def _new_app(self):
         with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            return CoffreApp(self.root)
+            app = CoffreApp(self.root)
+        # Audit E3 : voir le commentaire equivalent dans GuiTestCase.setUp -
+        # cette classe construit ses CoffreApp via sa propre _new_app, sans
+        # passer par GuiTestCase, donc le meme nettoyage y est necessaire.
+        if getattr(app, "_update_check_job", None) is not None:
+            self.root.after_cancel(app._update_check_job)
+            app._update_check_job = None
+        return app
 
     def _unlock_into(self, app, password):
         app._unlock_password_var.set(password)
@@ -913,6 +1031,146 @@ class ClipboardHistoryExclusionTestCase(GuiTestCase):
             "les formats d'exclusion ne sont jamais apparus sur le presse-papier "
             "dans le delai imparti, malgre plusieurs tentatives",
         )
+
+
+class EnterKeySubmitsFormsTestCase(GuiTestCase):
+    """Correctif audit C3 : Entree validait deja les ecrans de creation et
+    de deverrouillage du coffre - ce comportement etait absent des
+    dialogues d'ajout/modification d'entree, de changement de mot de passe
+    maitre, et du champ de longueur du generateur, obligeant a repasser par
+    la souris pour valider malgre l'habitude prise sur les deux premiers
+    ecrans."""
+
+    def test_return_in_the_entry_dialog_saves_and_closes_it(self):
+        self.app._open_entry_dialog(None)
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+
+        title_entry = dialog.grid_slaves(row=0, column=1)[0]
+        title_entry.insert(0, "Nouveau site")
+        self.root.update()
+
+        # _press_return (pas un simple event_generate) : voir la docstring
+        # de _wait_for_real_focus - sans passer reellement le focus au
+        # widget vise au prealable, l'evenement synthetise est livre a la
+        # mauvaise fenetre dans cet environnement de test et le dialogue.bind
+        # n'est jamais declenche, independamment du code produit.
+        _press_return(self.root, title_entry)
+
+        self.assertFalse(dialog.winfo_exists(), "Entree doit valider et fermer le dialogue comme le bouton Enregistrer")
+        entries = self.app.vault.list_entries()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["title"], "Nouveau site")
+
+    def test_return_inside_the_notes_field_does_not_submit_the_form(self):
+        # Le widget Notes est un tkinter.Text multi-ligne : Entree doit y
+        # rester un simple saut de ligne, jamais valider le formulaire - a
+        # la difference du champ Titre teste ci-dessus, dans le meme
+        # dialogue.
+        self.app._open_entry_dialog(None)
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+
+        title_entry = dialog.grid_slaves(row=0, column=1)[0]
+        title_entry.insert(0, "Site avec des notes")
+        notes_text = _find_widget(dialog, lambda w: w.winfo_class() == "Text")
+        self.assertIsNotNone(notes_text, "le widget Notes (tkinter.Text) devrait exister dans ce dialogue")
+        self.root.update()
+
+        _press_return(self.root, notes_text)
+
+        self.assertTrue(dialog.winfo_exists(), "le dialogue ne doit PAS se fermer quand Entree est tapee dans les notes")
+        self.assertEqual(len(self.app.vault.list_entries()), 0, "aucune entree ne doit avoir ete enregistree")
+        dialog.destroy()
+
+    def test_return_in_the_change_password_dialog_saves_it(self):
+        self.app._open_change_password_dialog()
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+
+        current_entry = dialog.grid_slaves(row=0, column=1)[0]
+        new_entry = dialog.grid_slaves(row=1, column=1)[0]
+        confirm_entry = dialog.grid_slaves(row=2, column=1)[0]
+        current_entry.insert(0, "mot-de-passe-maitre-de-test")
+        new_entry.insert(0, "nouveau-mot-de-passe-maitre")
+        confirm_entry.insert(0, "nouveau-mot-de-passe-maitre")
+        self.root.update()
+
+        with patch("gui.messagebox.showinfo") as mock_info:
+            _press_return(self.root, confirm_entry)
+
+        mock_info.assert_called_once()
+        self.assertFalse(dialog.winfo_exists())
+        self.assertTrue(
+            self.app.vault.unlock("nouveau-mot-de-passe-maitre"),
+            "le nouveau mot de passe doit reellement fonctionner, pas seulement declencher le message de succes",
+        )
+
+    def test_return_in_the_generator_length_field_regenerates_the_password(self):
+        self.app._open_generator_dialog()
+        dialog = self.app._open_dialogs[-1]
+        self.root.update()
+        spinbox = _find_spinbox(dialog)
+        self.assertIsNotNone(spinbox)
+
+        with patch("gui.generate_password", wraps=gui.generate_password) as mock_generate:
+            _press_return(self.root, spinbox)
+
+        mock_generate.assert_called_once()
+        dialog.destroy()
+
+
+class UpdateCheckTimerCancelledOnCloseTestCase(unittest.TestCase):
+    """Correctif audit E3 : le timer de sondage de mise a jour
+    (_poll_update_check, reprogramme via root.after tant que le thread
+    reseau n'a rien depose dans la file d'attente) doit etre annule
+    explicitement a la fermeture de l'application - exactement comme
+    _auto_lock_job l'est deja dans _lock_vault - pour ne pas laisser un
+    after() orphelin tenter de s'executer apres root.destroy() (observe a
+    l'audit sous forme d'erreurs Tcl "invalid command name" repetees dans
+    la sortie de la suite de tests)."""
+
+    def setUp(self):
+        self.tmp_dir = Path(tempfile.mkdtemp())
+        self.root = tk.Tk()
+        self.root.withdraw()
+        self.addCleanup(self._safe_destroy)
+
+    def _safe_destroy(self):
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    def _new_app(self):
+        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+            return CoffreApp(self.root)
+
+    def test_the_update_check_job_id_is_tracked_after_startup(self):
+        app = self._new_app()
+        self.assertIsNotNone(app._update_check_job, "l'id du timer de sondage doit etre conserve des le demarrage")
+
+    def test_on_close_cancels_the_pending_update_check_timer_without_error(self):
+        app = self._new_app()
+        self.assertIsNotNone(app._update_check_job)
+
+        app._on_close()  # ne doit lever aucune TclError
+
+        self.assertIsNone(app._update_check_job, "l'attribut doit etre remis a None une fois le timer annule")
+
+    def test_processing_a_result_stops_rescheduling_the_timer(self):
+        # Verifie l'autre branche de _poll_update_check : une fois qu'un
+        # resultat a ete depose dans la file et traite, plus rien ne doit
+        # etre reprogramme (sinon le timer ne s'arreterait jamais de tourner
+        # tant que l'appli reste ouverte).
+        app = self._new_app()
+        self.root.after_cancel(app._update_check_job)
+        app._update_check_job = None
+
+        app._update_check_queue.put(("up_to_date", None))
+        app._poll_update_check()
+
+        self.assertIsNone(app._update_check_job, "aucun nouveau timer ne doit etre programme une fois un resultat traite")
 
 
 if __name__ == "__main__":

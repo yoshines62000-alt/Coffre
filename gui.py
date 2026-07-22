@@ -241,7 +241,15 @@ class CoffreApp:
 
         self._update_check_queue = queue.Queue()
         update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
-        self.root.after(500, self._poll_update_check)
+        # Audit E3 : l'id retourne par root.after() est conserve pour
+        # pouvoir annuler ce timer explicitement a la fermeture (_on_close)
+        # via after_cancel - meme pattern que _auto_lock_job. Sans ca, un
+        # timer orphelin (le thread reseau peut prendre jusqu'a 5 secondes,
+        # voir update_checker.py) survivait a root.destroy() dans certains
+        # contextes (observe pendant les tests, qui creent/detruisent leur
+        # propre Tk() a chaque test : erreurs Tcl "invalid command name"
+        # sur la sortie standard).
+        self._update_check_job = self.root.after(500, self._poll_update_check)
 
         self.container = ttk.Frame(self.root)
         self.container.pack(fill=BOTH, expand=True)
@@ -259,8 +267,9 @@ class CoffreApp:
         try:
             status, tag = self._update_check_queue.get_nowait()
         except queue.Empty:
-            self.root.after(500, self._poll_update_check)
+            self._update_check_job = self.root.after(500, self._poll_update_check)
             return
+        self._update_check_job = None
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
             self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
@@ -332,12 +341,16 @@ class CoffreApp:
             if self._create_password_var.get() != self._create_confirm_var.get():
                 messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
                 return
-            # derive_key (scrypt) prend ~360ms mesures et bloque le thread
-            # principal Tkinter : desactivation du bouton + curseur d'attente
-            # pour donner une retroaction visuelle et empecher un double-clic
-            # de lancer un second calcul scrypt en parallele (trouvaille
-            # d'audit "Phase 2"). update_idletasks() force le rendu de ces
-            # deux changements AVANT l'appel bloquant qui suit.
+            # derive_key (scrypt) prend ~550ms mesures (constat d'audit G5 :
+            # ce chiffre a change avec le renforcement du KDF, SCRYPT_N
+            # passe de 2**16 a 2**17 - voir crypto.py - qui a double le
+            # cout mesure d'environ 276ms a environ 550ms sur la meme
+            # machine) et bloque le thread principal Tkinter : desactivation
+            # du bouton + curseur d'attente pour donner une retroaction
+            # visuelle et empecher un double-clic de lancer un second calcul
+            # scrypt en parallele (trouvaille d'audit "Phase 2").
+            # update_idletasks() force le rendu de ces deux changements
+            # AVANT l'appel bloquant qui suit.
             create_button.config(state="disabled")
             self.root.config(cursor="wait")
             self.root.update_idletasks()
@@ -371,7 +384,8 @@ class CoffreApp:
 
         def on_unlock():
             # Meme raison que sur l'ecran de creation : derive_key (scrypt)
-            # bloque le thread Tkinter ~360ms sans retroaction sinon.
+            # bloque le thread Tkinter ~550ms sans retroaction sinon (voir
+            # le commentaire equivalent plus haut, constat d'audit G5).
             unlock_button.config(state="disabled")
             self.root.config(cursor="wait")
             self.root.update_idletasks()
@@ -394,6 +408,11 @@ class CoffreApp:
             else:
                 self._unlock_status_var.set("Mot de passe incorrect.")
                 self._unlock_password_var.set("")
+                # Audit C10 : sans ce focus_set() explicite, le champ vide
+                # perdait le focus apres un mot de passe incorrect - il
+                # fallait recliquer dedans avant de pouvoir retaper, au lieu
+                # d'enchainer directement au clavier.
+                entry.focus_set()
 
         unlock_button = ttk.Button(frame, text="Deverrouiller", command=on_unlock)
         unlock_button.pack()
@@ -687,6 +706,22 @@ class CoffreApp:
             dialog.destroy()
             self._refresh_entries()
 
+        def on_return(event):
+            # Audit C3 : uniformise le raccourci Entree=valider avec les
+            # ecrans de creation/deverrouillage du coffre, qui l'avaient
+            # deja - ce dialogue en etait depourvu. Lie sur le dialogue
+            # entier (pas champ par champ) pour rester correct si un futur
+            # champ Entry est ajoute, MAIS le widget Notes est un
+            # tkinter.Text multi-ligne ou Entree doit rester un simple saut
+            # de ligne, jamais une validation du formulaire - exclu
+            # explicitement via le widget qui a effectivement le focus au
+            # moment de l'evenement.
+            if isinstance(event.widget, Text):
+                return
+            on_save()
+
+        dialog.bind("<Return>", on_return)
+
         buttons = ttk.Frame(dialog)
         buttons.grid(row=6, column=0, columnspan=3, pady=10)
         ttk.Button(buttons, text="Enregistrer", command=on_save).pack(side=LEFT, padx=5)
@@ -775,10 +810,11 @@ class CoffreApp:
         # ordinaire, from_/to n'etant appliques qu'aux fleches). Voir
         # _is_valid_length_input et le filet de securite dans do_generate.
         length_vcmd = (dialog.register(_is_valid_length_input), "%P")
-        ttk.Spinbox(
+        length_spinbox = ttk.Spinbox(
             dialog, from_=4, to=128, textvariable=length_var, width=6,
             validate="key", validatecommand=length_vcmd,
-        ).grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
+        )
+        length_spinbox.grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
 
         ttk.Checkbutton(dialog, text="Majuscules (A-Z)", variable=use_upper).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
         ttk.Checkbutton(dialog, text="Minuscules (a-z)", variable=use_lower).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
@@ -811,6 +847,14 @@ class CoffreApp:
                 ))
             except VaultError as exc:
                 messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
+
+        # Audit C3 : uniformise Entree=valider avec le reste du logiciel -
+        # lie uniquement sur le champ de longueur (pas tout le dialogue,
+        # qui n'a pas de bouton "principal" evident parmi Regenerer/
+        # Copier/Utiliser) : c'est le seul champ de saisie de ce dialogue,
+        # et regenerer est l'action la plus naturelle apres avoir tape une
+        # nouvelle longueur au clavier.
+        length_spinbox.bind("<Return>", lambda event: do_generate())
 
         def do_copy():
             if not result_var.get():
@@ -1005,9 +1049,11 @@ class CoffreApp:
                 messagebox.showwarning(APP_TITLE, "Les deux nouveaux mots de passe ne correspondent pas.", parent=dialog)
                 return
             # change_master_password derive DEUX cles scrypt (ancien puis
-            # nouveau mot de passe), donc ~2x360ms mesures ici - retroaction
-            # visuelle d'autant plus necessaire que sur les deux autres
-            # ecrans (creation/deverrouillage).
+            # nouveau mot de passe), donc ~2x550ms mesures ici (constat
+            # d'audit G5, meme chiffre de base que sur les deux autres
+            # ecrans) - retroaction visuelle d'autant plus necessaire que
+            # sur les ecrans creation/deverrouillage qui n'en derivent
+            # qu'une seule.
             save_button.config(state="disabled")
             self.root.config(cursor="wait")
             self.root.update_idletasks()
@@ -1021,6 +1067,12 @@ class CoffreApp:
                 self.root.config(cursor="")
             dialog.destroy()
             messagebox.showinfo(APP_TITLE, "Mot de passe maitre change avec succes.")
+
+        # Audit C3 : ce dialogue n'a pas de widget multi-ligne (contrairement
+        # a _open_entry_dialog et ses Notes) - Entree peut donc valider sans
+        # exception, exactement comme sur les ecrans de creation/
+        # deverrouillage du coffre.
+        dialog.bind("<Return>", lambda event: on_save())
 
         buttons = ttk.Frame(dialog)
         buttons.grid(row=3, column=0, columnspan=2, pady=10)
@@ -1104,6 +1156,19 @@ class CoffreApp:
     # -- fermeture ----------------------------------------------------------------
 
     def _on_close(self):
+        # Audit E3 : annule le timer de sondage de mise a jour (voir
+        # _poll_update_check / self._update_check_job) avant de detruire
+        # root, exactement comme _lock_vault le fait deja pour
+        # _auto_lock_job - sans ca, ce root.after() deja programme (jusqu'a
+        # 500ms d'attente, le thread reseau sous-jacent pouvant lui prendre
+        # jusqu'a 5 secondes avant de deposer un resultat dans la file)
+        # pouvait se declencher sur un interprete Tcl deja detruit.
+        if getattr(self, "_update_check_job", None) is not None:
+            try:
+                self.root.after_cancel(self._update_check_job)
+            except Exception:
+                pass
+            self._update_check_job = None
         # root.destroy() arrete la boucle Tkinter : tout root.after(...)
         # deja programme pour effacer le presse-papier (voir _copy_field)
         # ne s'executera donc jamais si l'app se ferme avant son delai -
