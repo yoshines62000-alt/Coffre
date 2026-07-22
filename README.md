@@ -65,6 +65,23 @@ L'exécutable n'étant pas signé numériquement, Windows SmartScreen peut
 afficher un avertissement au premier lancement : cliquez sur **Informations
 complémentaires** puis **Exécuter quand même**.
 
+### Vérifier l'intégrité du fichier téléchargé (optionnel)
+
+Chaque release GitHub publie, dans ses notes de version, l'empreinte
+**SHA-256** de `Coffre.exe`. Vous pouvez vérifier que le fichier téléchargé
+correspond exactement à celui publié par le développeur (protection contre
+une altération en transit, une compromission du dépôt, ou une confusion
+entre plusieurs versions) avec PowerShell :
+
+```powershell
+Get-FileHash .\Coffre.exe -Algorithm SHA256
+```
+
+Comparez la valeur `Hash` affichée avec celle indiquée dans les notes de la
+[release correspondante](https://github.com/yoshines62000-alt/Coffre/releases).
+Si les deux empreintes ne correspondent pas exactement, ne lancez pas le
+fichier et retéléchargez-le depuis la page officielle des releases.
+
 ## Lancer depuis le code source
 
 Alternative à l'exécutable, pour les développeurs ou par souci de
@@ -111,6 +128,20 @@ L'exécutable est produit dans `dist/Coffre.exe` (fichier unique, sans
 console). Le fichier `.spec` du dépôt fixe la configuration de build pour un
 résultat reproductible. Les dossiers `build/` et `dist/` ne sont pas suivis
 par Git.
+
+### Processus de publication d'une release
+
+Avant de rendre une release GitHub publique, calculer l'empreinte SHA-256
+de l'exécutable fraîchement généré :
+
+```powershell
+Get-FileHash dist\Coffre.exe -Algorithm SHA256 | Format-List
+```
+
+Coller la valeur `Hash` obtenue dans les notes de la release GitHub (ou
+l'attacher en tant qu'asset séparé `Coffre.exe.sha256`), afin que tout
+utilisateur puisse vérifier hors bande l'intégrité du fichier téléchargé
+(voir « Vérifier l'intégrité du fichier téléchargé » plus haut).
 
 ## Tests
 
