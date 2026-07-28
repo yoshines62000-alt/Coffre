@@ -244,6 +244,16 @@ class CoffreApp:
             self.root.destroy()
             raise SystemExit(1)
         self._clipboard_pending_value = None
+        # Audit 2026-07-28 (finding faible) : identifiant de copie
+        # incremente a chaque copie (voir _copy_field/do_copy et
+        # _maybe_clear_clipboard) - distingue precisement CETTE copie de
+        # toute autre copie qui aurait EXACTEMENT le meme contenu (meme mot
+        # de passe copie deux fois de suite). Une simple comparaison de
+        # contenu ne peut pas faire cette distinction : le minuteur de la
+        # PREMIERE copie effacerait alors a tort le presse-papier avant les
+        # CLIPBOARD_CLEAR_SECONDS pleines de la copie la plus recente.
+        self._clipboard_copy_counter = 0
+        self._clipboard_active_copy_id = None
         self._auto_lock_job = None
         # Audit J1 : id retourne par root.after() pour le rafraichissement
         # differe (anti-rebond) de la liste apres une frappe dans le champ
@@ -277,16 +287,22 @@ class CoffreApp:
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
         self._update_check_queue = queue.Queue()
-        update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
-        # Audit E3 : l'id retourne par root.after() est conserve pour
-        # pouvoir annuler ce timer explicitement a la fermeture (_on_close)
-        # via after_cancel - meme pattern que _auto_lock_job. Sans ca, un
-        # timer orphelin (le thread reseau peut prendre jusqu'a 5 secondes,
-        # voir update_checker.py) survivait a root.destroy() dans certains
-        # contextes (observe pendant les tests, qui creent/detruisent leur
-        # propre Tk() a chaque test : erreurs Tcl "invalid command name"
-        # sur la sortie standard).
-        self._update_check_job = self.root.after(500, self._poll_update_check)
+        self._update_check_job = None
+        # Audit 2026-07-28 (finding eleve) : le README annonce "aucune
+        # connexion reseau", or ce GET vers l'API GitHub (update_checker.py)
+        # s'execute inconditionnellement au demarrage - documente ci-dessous
+        # et desormais desactivable via COFFRE_DISABLE_UPDATE_CHECK=1.
+        if os.environ.get("COFFRE_DISABLE_UPDATE_CHECK") != "1":
+            update_checker.start_update_check(APP_VERSION, UPDATE_REPO, self._update_check_queue)
+            # Audit E3 : l'id retourne par root.after() est conserve pour
+            # pouvoir annuler ce timer explicitement a la fermeture (_on_close)
+            # via after_cancel - meme pattern que _auto_lock_job. Sans ca, un
+            # timer orphelin (le thread reseau peut prendre jusqu'a 5 secondes,
+            # voir update_checker.py) survivait a root.destroy() dans certains
+            # contextes (observe pendant les tests, qui creent/detruisent leur
+            # propre Tk() a chaque test : erreurs Tcl "invalid command name"
+            # sur la sortie standard).
+            self._update_check_job = self.root.after(500, self._poll_update_check)
 
         self.container = ttk.Frame(self.root)
         self.container.pack(fill=BOTH, expand=True)
@@ -296,6 +312,17 @@ class CoffreApp:
 
         self.root.bind_all("<Any-KeyPress>", self._reset_activity_timer, add="+")
         self.root.bind_all("<Any-Button>", self._reset_activity_timer, add="+")
+        # Audit 2026-07-28 (finding moyen) : <Any-Button> ne couvre que les
+        # CLICS de souris - un utilisateur qui consulte activement le coffre
+        # a la molette (sans jamais cliquer ni taper) se faisait donc quand
+        # meme verrouiller apres AUTO_LOCK_SECONDS. <MouseWheel> est
+        # l'evenement Windows/macOS ; <Button-4>/<Button-5> sont les
+        # evenements X11 (scroll molette sous Linux, ou il n'existe pas de
+        # <MouseWheel>) - ajoutes par coherence multiplateforme meme si
+        # l'app cible surtout Windows.
+        self.root.bind_all("<MouseWheel>", self._reset_activity_timer, add="+")
+        self.root.bind_all("<Button-4>", self._reset_activity_timer, add="+")
+        self.root.bind_all("<Button-5>", self._reset_activity_timer, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._show_unlock_screen()
@@ -849,21 +876,47 @@ class CoffreApp:
         # protege que le presse-papier "courant", pas la copie que Windows
         # peut avoir conservee de son cote.
         _exclude_current_clipboard_from_history_and_sync()
-        self._clipboard_pending_value = value
-        self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, lambda: self._maybe_clear_clipboard(value))
+        self._schedule_clipboard_clear(value)
 
-    def _maybe_clear_clipboard(self, expected_value: str):
+    def _schedule_clipboard_clear(self, value: str) -> None:
+        """Enregistre `value` comme la copie active et programme son
+        effacement dans CLIPBOARD_CLEAR_SECONDS - factorise entre
+        _copy_field et le bouton "Copier" du generateur (do_copy), qui
+        avaient auparavant chacun leur propre copie de cette logique.
+
+        Audit 2026-07-28 (finding faible) : un identifiant de copie
+        (compteur incremente) est capture ici et transmis a
+        _maybe_clear_clipboard, plutot que de se fier uniquement au
+        CONTENU copie pour reconnaitre "cette" copie - deux copies
+        successives du meme mot de passe partageraient sinon le meme
+        `expected_value`, et le minuteur de la premiere copie effacerait
+        alors a tort le presse-papier avant que les CLIPBOARD_CLEAR_SECONDS
+        de la seconde (plus recente) ne soient ecoulees."""
+        self._clipboard_copy_counter += 1
+        copy_id = self._clipboard_copy_counter
+        self._clipboard_active_copy_id = copy_id
+        self._clipboard_pending_value = value
+        self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, lambda: self._maybe_clear_clipboard(copy_id, value))
+
+    def _maybe_clear_clipboard(self, copy_id: int, expected_value: str):
+        # Ignore ce minuteur si une copie PLUS RECENTE a eu lieu entre-temps
+        # (meme avec un contenu identique) - c'est elle, et elle seule, qui
+        # doit encore decider du sort du presse-papier. Voir
+        # _schedule_clipboard_clear (audit 2026-07-28, finding faible).
+        if self._clipboard_active_copy_id != copy_id:
+            return
         # Ne vide le presse-papier que s'il contient toujours EXACTEMENT ce
         # qu'on y a copie - sinon l'utilisateur aurait deja copie autre
-        # chose entre-temps, et on effacerait ce nouveau contenu par erreur.
+        # chose entre-temps (en dehors de Coffre), et on effacerait ce
+        # nouveau contenu par erreur.
         try:
             current = self.root.clipboard_get()
         except Exception:
             current = None
         if current == expected_value:
             self.root.clipboard_clear()
-        if self._clipboard_pending_value == expected_value:
-            self._clipboard_pending_value = None
+        self._clipboard_pending_value = None
+        self._clipboard_active_copy_id = None
 
     # -- generateur de mot de passe -----------------------------------------------
 
@@ -941,8 +994,7 @@ class CoffreApp:
             self.root.clipboard_clear()
             self.root.clipboard_append(result_var.get())
             _exclude_current_clipboard_from_history_and_sync()  # voir _copy_field, audit A11
-            self._clipboard_pending_value = result_var.get()
-            self.root.after(CLIPBOARD_CLEAR_SECONDS * 1000, lambda v=result_var.get(): self._maybe_clear_clipboard(v))
+            self._schedule_clipboard_clear(result_var.get())
 
         def do_use():
             if target_var is not None and result_var.get():

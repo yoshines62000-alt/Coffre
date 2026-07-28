@@ -48,8 +48,9 @@ votre machine.
 - **Changement de mot de passe maître** : re-chiffre l'intégralité du
   coffre de façon atomique (jamais d'état intermédiaire corrompu, même en
   cas d'interruption).
-- **100 % local, zéro cloud** : aucune connexion réseau, aucun compte,
-  aucune télémétrie.
+- **100 % local, zéro cloud** : vos données ne quittent jamais votre machine
+  — aucun compte, aucune télémétrie, aucune synchronisation. Seule exception :
+  une vérification de mise à jour au démarrage (voir [Confidentialité](#confidentialité)).
 - **Gratuit et open source, pour toujours**.
 
 ## Démarrage rapide
@@ -108,8 +109,17 @@ python -m pip install -r requirements.txt
 
 ## Confidentialité
 
-- Aucune donnée ne quitte votre machine : pas de compte, pas de serveur, pas
-  de télémétrie, aucune synchronisation.
+- Aucune donnée (mot de passe, identifiant, note...) ne quitte votre
+  machine : pas de compte, pas de serveur, pas de télémétrie, aucune
+  synchronisation.
+- **Seule exception** : au démarrage, Coffre effectue une simple requête
+  GET vers `api.github.com` pour vérifier si une nouvelle version est
+  disponible (aucune donnée envoyée au-delà de cette requête — voir
+  [`update_checker.py`](update_checker.py)). Un échec (hors ligne, GitHub
+  inaccessible) est silencieux et n'empêche jamais l'application de
+  fonctionner. Pour désactiver entièrement cette vérification, définissez la
+  variable d'environnement `COFFRE_DISABLE_UPDATE_CHECK=1` avant de lancer
+  l'application.
 - Les données sont stockées, entièrement chiffrées, dans
   `%APPDATA%\Coffre\coffre.sqlite` (résolu depuis la variable d'environnement
   `%APPDATA%` elle-même, y compris si elle est redirigée par une politique

@@ -390,6 +390,44 @@ class AutoLockWarningTestCase(GuiTestCase):
         self.root.update()
         self.assertFalse(_is_packed(self.app._auto_lock_warning_label))
 
+    def test_mouse_wheel_scrolling_resets_the_activity_timer(self):
+        # Regression trouvee a l'audit (2026-07-28, finding moyen) : avant
+        # correctif, seuls <Any-KeyPress>/<Any-Button> (bind_all dans
+        # CoffreApp.__init__) reinitialisaient le minuteur d'inactivite - un
+        # utilisateur qui scrolle activement dans le coffre sans jamais
+        # cliquer ni taper pouvait donc se faire verrouiller en pleine
+        # consultation. <MouseWheel> est un type d'evenement Tk distinct de
+        # ButtonPress : <Any-Button> ne le capturait pas.
+        self.app._last_activity = time.monotonic() - (AUTO_LOCK_SECONDS - 10)
+        self.app._check_auto_lock()
+        self.root.update()
+        self.assertTrue(_is_packed(self.app._auto_lock_warning_label))
+
+        self.root.event_generate("<MouseWheel>")
+        self.root.update()
+        self.app._check_auto_lock()
+        self.root.update()
+        self.assertFalse(
+            _is_packed(self.app._auto_lock_warning_label),
+            "un evenement <MouseWheel> doit reinitialiser le minuteur d'inactivite comme un clic/une frappe",
+        )
+
+    def test_x11_scroll_button_events_also_reset_the_activity_timer(self):
+        # <Button-4>/<Button-5> : evenements de scroll molette sous X11
+        # (Linux), ajoutes par coherence multiplateforme aux cotes de
+        # <MouseWheel> - voir le commentaire au-dessus de test_mouse_wheel_
+        # scrolling_resets_the_activity_timer.
+        self.app._last_activity = time.monotonic() - (AUTO_LOCK_SECONDS - 10)
+        self.app._check_auto_lock()
+        self.root.update()
+        self.assertTrue(_is_packed(self.app._auto_lock_warning_label))
+
+        self.root.event_generate("<Button-4>")
+        self.root.update()
+        self.app._check_auto_lock()
+        self.root.update()
+        self.assertFalse(_is_packed(self.app._auto_lock_warning_label))
+
     def test_the_vault_still_locks_unconditionally_once_the_delay_elapses(self):
         self.app._last_activity = time.monotonic() - AUTO_LOCK_SECONDS - 1
         self.app._check_auto_lock()
@@ -1034,6 +1072,81 @@ class ClipboardHistoryExclusionTestCase(GuiTestCase):
         )
 
 
+class ClipboardClearIdentityTestCase(GuiTestCase):
+    """Correctif audit 2026-07-28 (finding faible) - _maybe_clear_clipboard
+    ne comparait auparavant que le CONTENU du presse-papier pour decider
+    s'il fallait l'effacer apres CLIPBOARD_CLEAR_SECONDS. Copier deux fois
+    de suite EXACTEMENT le meme mot de passe programmait alors deux
+    minuteurs avec le meme `expected_value` : celui de la PREMIERE copie
+    pouvait effacer le presse-papier avant que les CLIPBOARD_CLEAR_SECONDS
+    de la seconde (la copie la plus recente) ne soient ecoules. Un
+    identifiant de copie incremente (_clipboard_copy_counter /
+    _clipboard_active_copy_id) distingue desormais precisement CETTE copie
+    de toute autre copie de meme contenu.
+
+    Ces tests pilotent directement _schedule_clipboard_clear et
+    _maybe_clear_clipboard plutot que d'attendre le vrai delai de
+    CLIPBOARD_CLEAR_SECONDS (20s), pour rester rapides - exactement ce que
+    ferait root.after() une fois le delai ecoule."""
+
+    def test_two_successive_copies_of_the_same_value_get_distinct_copy_ids(self):
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")
+        first_copy_id = self.app._clipboard_active_copy_id
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")
+        second_copy_id = self.app._clipboard_active_copy_id
+        self.assertIsNotNone(first_copy_id)
+        self.assertNotEqual(first_copy_id, second_copy_id)
+
+    def test_a_stale_timer_does_not_clear_a_more_recent_copy_of_the_same_value(self):
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append("meme-mot-de-passe")
+        self.root.update()
+
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")
+        stale_copy_id = self.app._clipboard_active_copy_id
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")  # deuxieme copie, contenu identique
+
+        # Simule le declenchement du minuteur de la PREMIERE copie, une fois
+        # perime (une copie plus recente de meme contenu a depuis eu lieu).
+        self.app._maybe_clear_clipboard(stale_copy_id, "meme-mot-de-passe")
+        self.root.update()
+
+        self.assertEqual(
+            self.app.root.clipboard_get(), "meme-mot-de-passe",
+            "le minuteur d'une copie perimee ne doit jamais effacer une copie plus recente, meme de contenu identique",
+        )
+
+    def test_the_most_recent_timer_still_clears_the_clipboard_normally(self):
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append("meme-mot-de-passe")
+        self.root.update()
+
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")
+        self.app._schedule_clipboard_clear("meme-mot-de-passe")
+        latest_copy_id = self.app._clipboard_active_copy_id
+
+        self.app._maybe_clear_clipboard(latest_copy_id, "meme-mot-de-passe")
+        self.root.update()
+
+        with self.assertRaises(tk.TclError):
+            self.app.root.clipboard_get()
+
+    def test_the_timer_never_clears_unrelated_content_copied_in_the_meantime(self):
+        # Garantie preexistante (comparaison de contenu) : toujours valable
+        # une fois l'identifiant de copie ajoute par-dessus.
+        self.app._schedule_clipboard_clear("mot-de-passe-original")
+        copy_id = self.app._clipboard_active_copy_id
+
+        self.app.root.clipboard_clear()
+        self.app.root.clipboard_append("autre-chose-copiee-entretemps")
+        self.root.update()
+
+        self.app._maybe_clear_clipboard(copy_id, "mot-de-passe-original")
+        self.root.update()
+
+        self.assertEqual(self.app.root.clipboard_get(), "autre-chose-copiee-entretemps")
+
+
 class EnterKeySubmitsFormsTestCase(GuiTestCase):
     """Correctif audit C3 : Entree validait deja les ecrans de creation et
     de deverrouillage du coffre - ce comportement etait absent des
@@ -1172,6 +1285,18 @@ class UpdateCheckTimerCancelledOnCloseTestCase(unittest.TestCase):
         app._poll_update_check()
 
         self.assertIsNone(app._update_check_job, "aucun nouveau timer ne doit etre programme une fois un resultat traite")
+
+    def test_disable_update_check_env_var_skips_the_network_call(self):
+        # Regression finding eleve gui.py:280 (audit 2026-07-28) : le README
+        # annonce "aucune connexion reseau" alors que le GET vers l'API
+        # GitHub s'executait inconditionnellement. COFFRE_DISABLE_UPDATE_CHECK
+        # doit desormais permettre de le desactiver entierement.
+        with patch.object(gui.update_checker, "start_update_check") as mock_start:
+            with patch.dict(os.environ, {"COFFRE_DISABLE_UPDATE_CHECK": "1"}):
+                app = self._new_app()
+
+        mock_start.assert_not_called()
+        self.assertIsNone(app._update_check_job, "aucun timer de sondage ne doit demarrer si la verification est desactivee")
 
 
 class DataDirResolutionTestCase(unittest.TestCase):

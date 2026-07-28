@@ -219,7 +219,12 @@ class Vault:
 
     def list_entries(self) -> list:
         self._require_unlocked()
-        return list(self._entries)
+        # Audit 2026-07-28 (finding moyen) : list(self._entries) copiait
+        # seulement la LISTE, pas les dicts qu'elle contient - un appelant
+        # qui modifiait un dict recu ici corrompait donc directement l'etat
+        # interne du coffre, en contradiction avec get_entry/update_entry
+        # qui copient deja chacun des dicts qu'ils renvoient.
+        return [dict(e) for e in self._entries]
 
     def get_entry(self, entry_id: int) -> Optional[dict]:
         self._require_unlocked()

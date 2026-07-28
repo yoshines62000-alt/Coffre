@@ -222,6 +222,22 @@ class EntryCrudTestCase(unittest.TestCase):
         self.assertIsNone(self.vault.get_entry(entry_id))
         self.assertEqual(self.vault.list_entries(), [])
 
+    def test_list_entries_returns_independent_copies_not_shared_references(self):
+        # Regression trouvee a l'audit (2026-07-28, finding moyen) :
+        # list_entries() renvoyait auparavant list(self._entries), qui copie
+        # la LISTE mais pas les dicts qu'elle contient - un appelant qui
+        # modifiait un dict recu ici corrompait donc directement l'etat
+        # interne du coffre, sans passer par update_entry. get_entry() et
+        # update_entry() copiaient deja chacun d'eux ; list_entries() doit
+        # desormais offrir la meme garantie.
+        entry_id = self.vault.add_entry("Site X", username="alice", password="ancien")
+        entries = self.vault.list_entries()
+        entries[0]["password"] = "corrompu-depuis-l-exterieur"
+
+        fresh = self.vault.get_entry(entry_id)
+        self.assertEqual(fresh["password"], "ancien")
+        self.assertEqual(self.vault.list_entries()[0]["password"], "ancien")
+
     def test_entries_are_actually_encrypted_at_rest_in_the_database(self):
         self.vault.add_entry("Site secret", username="alice", password="MotDePasseTresSecret")
         raw_rows = self.vault.db.list_entries()
