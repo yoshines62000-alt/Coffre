@@ -20,6 +20,7 @@ from tkinter import (
 
 import opl_theme
 import opl_contact
+import totp as totp_module
 import update_checker
 from vault import MIN_MASTER_PASSWORD_LENGTH, Vault, VaultError, generate_password, password_strength
 
@@ -282,11 +283,11 @@ class CoffreApp:
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
-        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground="#666").pack(side=LEFT, padx=(8, 0), pady=4)
+        ttk.Label(bottom_bar, text=f"v{APP_VERSION}", foreground=opl_theme.couleur("texte_doux")).pack(side=LEFT, padx=(8, 0), pady=4)
         self.update_status_var = StringVar(value="")
-        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground="#666")
+        self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
-        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground="#0645AD", cursor="hand2")
+        donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
 
@@ -340,11 +341,11 @@ class CoffreApp:
         self._update_check_job = None
         if status == "update_available":
             self.update_status_var.set(f"Mise a jour disponible : {tag} - Telecharger")
-            self.update_status_label.configure(foreground="#0645AD", cursor="hand2")
+            self.update_status_label.configure(foreground=opl_theme.couleur("lien"), cursor="hand2")
             self.update_status_label.bind("<Button-1>", lambda event: webbrowser.open(RELEASES_URL))
         elif status == "up_to_date":
             self.update_status_var.set("A jour")
-            self.update_status_label.configure(foreground="#1B7A1B", cursor="")
+            self.update_status_label.configure(foreground=opl_theme.couleur("succes"), cursor="")
         # "check_failed" (hors ligne, GitHub inaccessible...) : on ne
         # revendique rien plutot que d'afficher a tort "a jour".
 
@@ -359,9 +360,9 @@ class CoffreApp:
         frame = ttk.Frame(center)
         # Deux ttk.Label separes plutot qu'un texte "\n" : plus lisible a
         # composer avec BODY_FONT, sans autre raison particuliere ici.
-        ttk.Label(frame, text="Aucun coffre n'existe encore sur cette machine.", foreground="black", font=BODY_FONT).pack()
-        ttk.Label(frame, text="Creez un mot de passe maitre pour commencer.", foreground="black", font=BODY_FONT).pack(pady=(0, 15))
-        ttk.Label(frame, text="Nouveau mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        ttk.Label(frame, text="Aucun coffre n'existe encore sur cette machine.", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack()
+        ttk.Label(frame, text="Creez un mot de passe maitre pour commencer.", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(pady=(0, 15))
+        ttk.Label(frame, text="Nouveau mot de passe maitre", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(anchor="w")
         self._create_password_var = StringVar()
         entry1 = ttk.Entry(frame, textvariable=self._create_password_var, show="*", width=32)
         entry1.pack(pady=(0, 2))
@@ -383,7 +384,7 @@ class CoffreApp:
             pw = self._create_password_var.get()
             if not pw:
                 create_strength_var.set(f"Au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres.")
-                create_strength_label.configure(foreground="#666")
+                create_strength_label.configure(foreground=opl_theme.couleur("texte_doux"))
                 return
             strength = password_strength(pw)
             create_strength_var.set(f"Solidite : {strength['label']}")
@@ -393,16 +394,16 @@ class CoffreApp:
         update_create_strength()
 
         self._create_confirm_var = StringVar()
-        ttk.Label(frame, text="Confirmer le mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        ttk.Label(frame, text="Confirmer le mot de passe maitre", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(anchor="w")
         entry2 = ttk.Entry(frame, textvariable=self._create_confirm_var, show="*", width=32)
         entry2.pack(pady=(0, 8))
         ttk.Label(
             frame, text="⚠️ Il n'existe AUCUN moyen de recuperer ce mot de passe s'il est",
-            foreground="#B00020",
+            foreground=opl_theme.couleur("danger"),
         ).pack()
         ttk.Label(
             frame, text="oublie : il sert lui-meme a chiffrer le coffre, il n'est stocke nulle part.",
-            foreground="#B00020",
+            foreground=opl_theme.couleur("danger"),
         ).pack(pady=(0, 12))
 
         def on_create():
@@ -443,12 +444,12 @@ class CoffreApp:
 
     def _build_unlock_only_screen(self, center):
         frame = ttk.Frame(center)
-        ttk.Label(frame, text="Mot de passe maitre", foreground="black", font=BODY_FONT).pack(anchor="w")
+        ttk.Label(frame, text="Mot de passe maitre", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(anchor="w")
         self._unlock_password_var = StringVar()
         entry = ttk.Entry(frame, textvariable=self._unlock_password_var, show="*", width=32)
         entry.pack(pady=(0, 8))
         self._unlock_status_var = StringVar()
-        ttk.Label(frame, textvariable=self._unlock_status_var, foreground="#B00020").pack(pady=(0, 8))
+        ttk.Label(frame, textvariable=self._unlock_status_var, foreground=opl_theme.couleur("danger")).pack(pady=(0, 8))
 
         def on_unlock():
             # Meme raison que sur l'ecran de creation : derive_key (scrypt)
@@ -503,7 +504,7 @@ class CoffreApp:
             self._unlock_center = ttk.Frame(self.unlock_frame)
             self._unlock_center.place(relx=0.5, rely=0.4, anchor="center")
             ttk.Label(
-                self._unlock_center, text="🔒 Coffre", font=("Segoe UI", 20, "bold"), foreground="black",
+                self._unlock_center, text="🔒 Coffre", font=("Segoe UI", 20, "bold"), foreground=opl_theme.couleur("texte"),
             ).pack(pady=(0, 15))
             self._creation_screen = None
             self._unlock_only_screen = None
@@ -559,7 +560,7 @@ class CoffreApp:
         # root.winfo_width().
         top = ttk.Frame(frame)
         top.pack(fill=X, padx=10, pady=(10, 0))
-        ttk.Label(top, text="Rechercher :", foreground="black", font=BODY_FONT).pack(side=LEFT)
+        ttk.Label(top, text="Rechercher :", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(side=LEFT)
         self.search_var = StringVar()
         search_entry = ttk.Entry(top, textvariable=self.search_var, width=30)
         search_entry.pack(side=LEFT, padx=5)
@@ -588,7 +589,7 @@ class CoffreApp:
         # n'en depend pas et se produit inconditionnellement.
         self._auto_lock_warning_var = StringVar()
         self._auto_lock_warning_label = ttk.Label(
-            frame, textvariable=self._auto_lock_warning_var, foreground="#B00020", font=BODY_FONT,
+            frame, textvariable=self._auto_lock_warning_var, foreground=opl_theme.couleur("danger"), font=BODY_FONT,
         )
 
         body = ttk.Frame(frame)
@@ -661,7 +662,7 @@ class CoffreApp:
         ttk.Label(
             frame, text="Double-cliquez sur une ligne pour la modifier. Le presse-papier est efface "
             f"automatiquement {CLIPBOARD_CLEAR_SECONDS} secondes apres une copie.",
-            foreground="#666",
+            foreground=opl_theme.couleur("texte_doux"),
         ).pack(anchor="w", padx=10, pady=(0, 8))
 
     def _selected_entry_id_from_tree(self):
@@ -714,16 +715,22 @@ class CoffreApp:
         username_var = StringVar(value=entry["username"] if entry else "")
         password_var = StringVar(value=entry["password"] if entry else "")
         url_var = StringVar(value=entry["url"] if entry else "")
+        # entry.get(...) et non entry[...] : une entree d'un coffre cree
+        # avant l'ajout du champ 2FA n'a pas la cle "totp" (voir
+        # vault._ENTRY_FIELDS) - la valeur par defaut vide preserve la
+        # compatibilite ascendante.
+        totp_var = StringVar(value=(entry.get("totp", "") if entry else ""))
         show_password = BooleanVar(value=False)
+        show_totp = BooleanVar(value=False)
 
-        ttk.Label(dialog, text="Titre", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Titre", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         title_entry = ttk.Entry(dialog, textvariable=title_var, width=40)
         title_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=(10, 0), sticky="we")
 
-        ttk.Label(dialog, text="Identifiant", foreground="black", font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Identifiant", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=username_var, width=40).grid(row=1, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
-        ttk.Label(dialog, text="Mot de passe", foreground="black", font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Mot de passe", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
         password_entry = ttk.Entry(dialog, textvariable=password_var, show="*", width=30)
         password_entry.grid(row=2, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
 
@@ -779,23 +786,134 @@ class CoffreApp:
             command=lambda: self._open_generator_dialog(target_var=password_var, parent=dialog),
         ).grid(row=3, column=1, sticky="w", padx=10, pady=(2, 0))
 
-        ttk.Label(dialog, text="Site / URL", foreground="black", font=BODY_FONT).grid(row=4, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Site / URL", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=4, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=url_var, width=40).grid(row=4, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
-        ttk.Label(dialog, text="Notes", foreground="black", font=BODY_FONT).grid(row=5, column=0, sticky="nw", padx=10, pady=(5, 0))
+        # -- Secret 2FA (TOTP), champ optionnel --------------------------------
+        ttk.Label(dialog, text="Secret 2FA (TOTP)", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=5, column=0, sticky="w", padx=10, pady=(5, 0))
+        totp_entry = ttk.Entry(dialog, textvariable=totp_var, show="*", width=30)
+        totp_entry.grid(row=5, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
+
+        def toggle_show_totp():
+            totp_entry.configure(show="" if show_totp.get() else "*")
+
+        ttk.Checkbutton(dialog, text="Afficher", variable=show_totp, command=toggle_show_totp).grid(row=5, column=2, padx=(5, 10), pady=(5, 0))
+
+        # Zone d'affichage du code courant : n'apparait (grid) que lorsqu'un
+        # secret valide est saisi, et se met a jour chaque seconde (voir
+        # refresh_totp / schedule_totp ci-dessous).
+        totp_display = ttk.Frame(dialog)
+        totp_display.grid(row=6, column=0, columnspan=3, padx=10, pady=(2, 0), sticky="we")
+        totp_display.columnconfigure(1, weight=1)
+        totp_code_var = StringVar(value="")
+        totp_status_var = StringVar(value="")
+        totp_code_label = ttk.Label(totp_display, textvariable=totp_code_var, style="Mono.TLabel")
+        totp_code_label.grid(row=0, column=0, sticky="w")
+        totp_progress = ttk.Progressbar(totp_display, orient="horizontal", mode="determinate", maximum=30, length=120)
+        totp_progress.grid(row=0, column=1, sticky="we", padx=(10, 10))
+        totp_status_label = ttk.Label(totp_display, textvariable=totp_status_var, style="Mono.TLabel")
+        totp_status_label.grid(row=0, column=2, sticky="e")
+        totp_copy_button = ttk.Button(totp_display, text="Copier le code")
+        totp_copy_button.grid(row=0, column=3, sticky="e", padx=(10, 0))
+
+        # Dernier code affiche (sans l'espace de mise en forme), pour la copie
+        # presse-papier - conserve dans une liste mutable pour etre visible
+        # depuis les closures ci-dessous sans variable "nonlocal".
+        current_code = [""]
+
+        def do_copy_totp():
+            code = current_code[0]
+            if not code:
+                return
+            self.root.clipboard_clear()
+            self.root.clipboard_append(code)
+            _exclude_current_clipboard_from_history_and_sync()  # voir _copy_field, audit A11
+            self._schedule_clipboard_clear(code)
+
+        totp_copy_button.configure(command=do_copy_totp)
+
+        def refresh_totp():
+            raw = totp_var.get()
+            if not raw.strip():
+                current_code[0] = ""
+                totp_code_var.set("")
+                totp_status_var.set("")
+                totp_progress.configure(value=0)
+                totp_copy_button.state(["disabled"])
+                return
+            if not totp_module.is_valid_secret(raw):
+                current_code[0] = ""
+                totp_code_var.set("Secret 2FA invalide")
+                totp_status_var.set("")
+                totp_progress.configure(value=0)
+                totp_copy_button.state(["disabled"])
+                return
+            code = totp_module.generate_totp(raw)
+            remaining = totp_module.seconds_remaining()
+            current_code[0] = code
+            # Affiche par groupes de 3 chiffres pour la lisibilite ("123 456").
+            totp_code_var.set(f"{code[:3]} {code[3:]}")
+            totp_status_var.set(f"{remaining} s")
+            totp_progress.configure(value=remaining)
+            totp_copy_button.state(["!disabled"])
+
+        # Minuteur de rafraichissement par seconde. L'id after() est conserve
+        # et annule au <Destroy> du dialogue (meme pattern que _auto_lock_job /
+        # _update_check_job cote application, et que remove_strength_trace
+        # ci-dessus) pour qu'aucun callback ne survive a la fermeture de la
+        # fenetre (ni ne tente d'ecrire dans un widget detruit).
+        totp_job = [None]
+
+        def tick():
+            try:
+                refresh_totp()
+            except TclError:
+                return
+            totp_job[0] = dialog.after(1000, tick)
+
+        def cancel_totp(event=None):
+            if totp_job[0] is not None:
+                try:
+                    dialog.after_cancel(totp_job[0])
+                except TclError:
+                    pass
+                totp_job[0] = None
+
+        totp_code_label.bind("<Destroy>", cancel_totp, add="+")
+        refresh_totp()
+        totp_job[0] = dialog.after(1000, tick)
+
+        ttk.Label(dialog, text="Notes", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=7, column=0, sticky="nw", padx=10, pady=(5, 0))
         from tkinter import Text
         notes_text = Text(dialog, width=40, height=5, wrap="word")
         notes_text.insert("1.0", entry["notes"] if entry else "")
-        notes_text.grid(row=5, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+        notes_text.grid(row=7, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
         def on_save():
             title = title_var.get().strip()
             if not title:
                 messagebox.showwarning(APP_TITLE, "Le titre ne peut pas etre vide.", parent=dialog)
                 return
+            # Secret 2FA : optionnel. On le normalise (base32, insensible aux
+            # espaces/casse) et on ne stocke QUE la forme normalisee valide.
+            # Un secret invalide n'interrompt PAS l'enregistrement des autres
+            # champs (exigence) : on avertit, on ne stocke pas le secret
+            # invalide, et on poursuit l'enregistrement.
+            raw_totp = totp_var.get().strip()
+            if raw_totp and not totp_module.is_valid_secret(raw_totp):
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "Le secret 2FA (TOTP) n'est pas un code base32 valide : il n'a pas ete "
+                    "enregistre. Les autres champs, eux, ont bien ete enregistres.",
+                    parent=dialog,
+                )
+                totp_value = ""
+            else:
+                totp_value = totp_module.normalize_secret(raw_totp) if raw_totp else ""
             fields = dict(
                 title=title, username=username_var.get(), password=password_var.get(),
                 url=url_var.get(), notes=notes_text.get("1.0", END).strip(),
+                totp=totp_value,
             )
             try:
                 if entry:
@@ -833,7 +951,7 @@ class CoffreApp:
         dialog.bind("<Return>", on_return)
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=6, column=0, columnspan=3, pady=10)
+        buttons.grid(row=8, column=0, columnspan=3, pady=10)
         ttk.Button(buttons, text="Enregistrer", command=on_save).pack(side=LEFT, padx=5)
         ttk.Button(buttons, text="Annuler", command=dialog.destroy).pack(side=LEFT, padx=5)
 
@@ -940,7 +1058,7 @@ class CoffreApp:
         avoid_ambiguous = BooleanVar(value=True)
         result_var = StringVar()
 
-        ttk.Label(dialog, text="Longueur", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Longueur", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         # validate="key" + validatecommand : empeche la saisie clavier de
         # texte libre (le Spinbox reste sinon editable comme un Entry
         # ordinaire, from_/to n'etant appliques qu'aux fleches). Voir
@@ -1029,7 +1147,7 @@ class CoffreApp:
 
     def _make_clickable_entry_label(self, parent, text, entry_id):
         label = ttk.Label(
-            parent, text=text, foreground="#0645AD", cursor="hand2", font=BODY_FONT,
+            parent, text=text, foreground=opl_theme.couleur("lien"), cursor="hand2", font=BODY_FONT,
             wraplength=380, justify="left",
         )
         label.bind("<Button-1>", lambda event, eid=entry_id: self._open_entry_from_listing_dialog(parent.winfo_toplevel(), eid))
@@ -1048,7 +1166,7 @@ class CoffreApp:
         if not groups:
             ttk.Label(
                 dialog, text="Aucun mot de passe n'est reutilise entre plusieurs entrees.",
-                foreground="black", font=BODY_FONT,
+                foreground=opl_theme.couleur("texte"), font=BODY_FONT,
             ).pack(padx=15, pady=15)
         else:
             plural = "s" if len(groups) > 1 else ""
@@ -1057,7 +1175,7 @@ class CoffreApp:
                 text=f"{len(groups)} mot{plural} de passe partage{plural} entre plusieurs entrees "
                 "(le mot de passe lui-meme n'est jamais affiche ici) - cliquez sur une entree "
                 "pour l'ouvrir en edition :",
-                foreground="black", font=BODY_FONT, wraplength=380, justify="left",
+                foreground=opl_theme.couleur("texte"), font=BODY_FONT, wraplength=380, justify="left",
             ).pack(anchor="w", padx=15, pady=(15, 5))
             for group_index, entries in enumerate(groups):
                 for entry in sorted(entries, key=lambda e: e["title"].lower()):
@@ -1080,7 +1198,7 @@ class CoffreApp:
         if not weak:
             ttk.Label(
                 dialog, text="Aucun mot de passe faible detecte.",
-                foreground="black", font=BODY_FONT,
+                foreground=opl_theme.couleur("texte"), font=BODY_FONT,
             ).pack(padx=15, pady=15)
         else:
             plural = "s" if len(weak) > 1 else ""
@@ -1089,7 +1207,7 @@ class CoffreApp:
                 text=f"{len(weak)} mot{plural} de passe juge{plural} faible ou tres faible "
                 "(le mot de passe lui-meme n'est jamais affiche ici) - cliquez sur une entree "
                 "pour l'ouvrir en edition :",
-                foreground="black", font=BODY_FONT, wraplength=380, justify="left",
+                foreground=opl_theme.couleur("texte"), font=BODY_FONT, wraplength=380, justify="left",
             ).pack(anchor="w", padx=15, pady=(15, 5))
             for entry in weak:
                 self._make_clickable_entry_label(
@@ -1139,12 +1257,12 @@ class CoffreApp:
         new_var = StringVar()
         confirm_var = StringVar()
 
-        ttk.Label(dialog, text="Mot de passe actuel", foreground="black", font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
+        ttk.Label(dialog, text="Mot de passe actuel", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
         ttk.Entry(dialog, textvariable=current_var, show="*", width=32).grid(row=0, column=1, padx=10, pady=(10, 0))
-        ttk.Label(dialog, text="Nouveau mot de passe", foreground="black", font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Nouveau mot de passe", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
         new_entry = ttk.Entry(dialog, textvariable=new_var, show="*", width=32)
         new_entry.grid(row=1, column=1, padx=10, pady=(5, 0))
-        ttk.Label(dialog, text="Confirmer le nouveau", foreground="black", font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Confirmer le nouveau", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
         ttk.Entry(dialog, textvariable=confirm_var, show="*", width=32).grid(row=2, column=1, padx=10, pady=(5, 0))
 
         # Audit A3 : meme indicateur de solidite que sur l'ecran de
@@ -1165,7 +1283,7 @@ class CoffreApp:
             pw = new_var.get()
             if not pw:
                 strength_var.set(f"Au moins {MIN_MASTER_PASSWORD_LENGTH} caracteres.")
-                strength_label.configure(foreground="#666")
+                strength_label.configure(foreground=opl_theme.couleur("texte_doux"))
                 return
             strength = password_strength(pw)
             strength_var.set(f"Solidite : {strength['label']}")

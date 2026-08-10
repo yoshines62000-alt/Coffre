@@ -211,6 +211,39 @@ class EntryCrudTestCase(unittest.TestCase):
         with self.assertRaises(VaultError):
             self.vault.update_entry(999, password="x")
 
+    def test_totp_secret_is_persisted_encrypted_and_recovered_after_reopen(self):
+        # Le secret 2FA (TOTP) est une donnee sensible : il doit etre chiffre
+        # dans le coffre exactement comme les autres champs, ne jamais
+        # apparaitre en clair sur le disque, et se retrouver intact apres
+        # fermeture/reouverture du fichier.
+        secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        entry_id = self.vault.add_entry("Site avec 2FA", username="alice", password="secret", totp=secret)
+        self.assertEqual(self.vault.get_entry(entry_id)["totp"], secret)
+
+        path = self.vault.db.path
+        self.vault.close()
+
+        # Le secret ne doit PAS se trouver en clair dans le fichier chiffre.
+        raw_bytes = Path(path).read_bytes()
+        self.assertNotIn(secret.encode("utf-8"), raw_bytes)
+
+        reopened = Vault(path)
+        self.addCleanup(reopened.close)
+        self.assertTrue(reopened.unlock("mot-de-passe-maitre"))
+        recovered = reopened.get_entry(entry_id)
+        self.assertEqual(recovered["totp"], secret)
+        # Les autres champs restent intacts.
+        self.assertEqual(recovered["username"], "alice")
+        self.assertEqual(recovered["password"], "secret")
+
+    def test_totp_secret_can_be_updated_and_cleared(self):
+        entry_id = self.vault.add_entry("Site X", password="p")
+        self.assertEqual(self.vault.get_entry(entry_id)["totp"], "")  # defaut vide
+        self.vault.update_entry(entry_id, totp="JBSWY3DPEHPK3PXP")
+        self.assertEqual(self.vault.get_entry(entry_id)["totp"], "JBSWY3DPEHPK3PXP")
+        self.vault.update_entry(entry_id, totp="")
+        self.assertEqual(self.vault.get_entry(entry_id)["totp"], "")
+
     def test_update_entry_rejects_clearing_the_title(self):
         entry_id = self.vault.add_entry("Site X")
         with self.assertRaises(VaultError):

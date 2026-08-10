@@ -30,7 +30,13 @@ from db import Database
 # passe lui-meme ni un hash direct dessus.
 _VERIFIER_PLAINTEXT = b"coffre-verifier-v1"
 
-_ENTRY_FIELDS = ("title", "username", "password", "url", "notes")
+# Champ "totp" ajoute apres coup (secret 2FA base32 chiffre dans l'entree,
+# voir totp.py) : place EN DERNIER volontairement, et lu partout via
+# entry.get(field, "") - un coffre cree avant cet ajout (entrees dont le
+# JSON dechiffre ne contient pas la cle "totp") continue de s'ouvrir et de
+# fonctionner, la valeur par defaut etant une chaine vide (migration douce,
+# aucune reecriture disque necessaire).
+_ENTRY_FIELDS = ("title", "username", "password", "url", "notes", "totp")
 
 AMBIGUOUS_CHARACTERS = "0O1lI"
 
@@ -196,10 +202,17 @@ class Vault:
 
     def _decode_entry(self, row) -> dict:
         payload = json.loads(crypto.decrypt(self._key, row["nonce"], row["ciphertext"]).decode("utf-8"))
-        payload["id"] = row["id"]
-        payload["created_at"] = row["created_at"]
-        payload["updated_at"] = row["updated_at"]
-        return payload
+        # Migration douce : un coffre cree avant l'ajout d'un champ (ex.
+        # "totp") a un JSON dechiffre sans cette cle. On complete chaque
+        # champ connu avec sa valeur par defaut (chaine vide) pour que toute
+        # entree presente TOUJOURS l'ensemble des champs de _ENTRY_FIELDS,
+        # sans jamais avoir a reecrire le disque - un coffre existant
+        # continue de s'ouvrir et de fonctionner tel quel.
+        entry = {field: payload.get(field, "") for field in _ENTRY_FIELDS}
+        entry["id"] = row["id"]
+        entry["created_at"] = row["created_at"]
+        entry["updated_at"] = row["updated_at"]
+        return entry
 
     def _decrypt_all_entries(self) -> tuple:
         entries = []
@@ -230,11 +243,11 @@ class Vault:
         self._require_unlocked()
         return next((dict(e) for e in self._entries if e["id"] == entry_id), None)
 
-    def add_entry(self, title: str, username: str = "", password: str = "", url: str = "", notes: str = "") -> int:
+    def add_entry(self, title: str, username: str = "", password: str = "", url: str = "", notes: str = "", totp: str = "") -> int:
         self._require_unlocked()
         if not title.strip():
             raise VaultError("Le titre ne peut pas etre vide.")
-        entry = {"title": title.strip(), "username": username, "password": password, "url": url, "notes": notes}
+        entry = {"title": title.strip(), "username": username, "password": password, "url": url, "notes": notes, "totp": totp}
         nonce, ciphertext = self._encrypt_payload(entry)
         entry_id = self.db.add_entry(nonce, ciphertext)
         row = self.db.get_entry(entry_id)
