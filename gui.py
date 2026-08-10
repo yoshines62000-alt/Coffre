@@ -18,6 +18,8 @@ from tkinter import (
     BooleanVar, IntVar, StringVar, TclError, Tk, Toplevel, ttk, filedialog, messagebox,
 )
 
+import opl_theme
+import opl_contact
 import update_checker
 from vault import MIN_MASTER_PASSWORD_LENGTH, Vault, VaultError, generate_password, password_strength
 
@@ -226,7 +228,7 @@ class CoffreApp:
         # deja fait pour l'ensemble de l'outil. Documente honnetement dans
         # le README (section "Limites connues") plutot que de laisser un
         # utilisateur dependant d'un lecteur d'ecran le decouvrir seul.
-        ttk.Style(self.root).theme_use("alt")
+        opl_theme.apply(self.root, "Coffre")
 
         try:
             self.vault = Vault(_data_dir() / "coffre.sqlite")
@@ -275,6 +277,8 @@ class CoffreApp:
                 self.root.iconbitmap(str(icon_path))
             except Exception:
                 pass
+
+        opl_theme.entete(self.root, "Coffre", "Gestionnaire de mots de passe", on_contact=lambda: opl_contact.ouvrir(self.root, app="Coffre", version=APP_VERSION)).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -430,7 +434,7 @@ class CoffreApp:
             self._create_confirm_var.set("")
             self._show_vault_screen()
 
-        create_button = ttk.Button(frame, text="Creer le coffre", command=on_create)
+        create_button = ttk.Button(frame, text="Creer le coffre", command=on_create, style="Accent.TButton")
         create_button.pack()
         self._focus_creation_entry = entry1
         entry1.bind("<Return>", lambda event: entry2.focus_set())
@@ -478,7 +482,7 @@ class CoffreApp:
                 # d'enchainer directement au clavier.
                 entry.focus_set()
 
-        unlock_button = ttk.Button(frame, text="Deverrouiller", command=on_unlock)
+        unlock_button = ttk.Button(frame, text="Deverrouiller", command=on_unlock, style="Accent.TButton")
         unlock_button.pack()
         # Vault.backup_to fonctionne deja coffre verrouille (le fichier est
         # chiffre au repos, aucun dechiffrement n'est necessaire) et c'est
