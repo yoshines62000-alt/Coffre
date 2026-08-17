@@ -26,7 +26,7 @@ import time
 import tkinter as tk
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -151,8 +151,15 @@ class GuiTestCase(unittest.TestCase):
         self.tmp_dir = Path(tempfile.mkdtemp())
         self.root = tk.Tk()
         self.root.withdraw()
-        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            self.app = CoffreApp(self.root)
+        # _avertir_si_coffre_ailleurs ouvre une boite MODALE quand le dossier
+        # cible n'a pas encore de coffre mais que %APPDATA% en porte un -- ce
+        # qui est exactement le cas ici (dossier temporaire neuf) sur toute
+        # machine ou l'utilisateur a deja un coffre. Sans ce stub, la suite
+        # entiere se bloque sur un dialogue en attente de clic.
+        # Son comportement propre est teste dans RemovableVaultDirTestCase.
+        with patch.object(gui, "_avertir_si_coffre_ailleurs"):
+            with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+                self.app = CoffreApp(self.root)
         self.app.vault.create("mot-de-passe-maitre-de-test")
         self.app._show_vault_screen()
         self.root.update()
@@ -618,8 +625,10 @@ class BlockingOperationFeedbackTestCase(unittest.TestCase):
             pass
 
     def _new_app(self):
-        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            app = CoffreApp(self.root)
+        # Stub du dialogue modal : voir GuiTestCase.setUp.
+        with patch.object(gui, "_avertir_si_coffre_ailleurs"):
+            with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+                app = CoffreApp(self.root)
         # Audit E3 : voir le commentaire equivalent dans GuiTestCase.setUp -
         # cette classe construit ses CoffreApp via sa propre _new_app, sans
         # passer par GuiTestCase, donc le meme nettoyage y est necessaire.
@@ -874,8 +883,10 @@ class MasterPasswordStrengthIndicatorTestCase(unittest.TestCase):
             pass
 
     def _new_app(self):
-        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            app = CoffreApp(self.root)
+        # Stub du dialogue modal : voir GuiTestCase.setUp.
+        with patch.object(gui, "_avertir_si_coffre_ailleurs"):
+            with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+                app = CoffreApp(self.root)
         # Audit E3 : voir le commentaire equivalent dans GuiTestCase.setUp -
         # cette classe construit ses CoffreApp via sa propre _new_app, sans
         # passer par GuiTestCase, donc le meme nettoyage y est necessaire.
@@ -1257,8 +1268,10 @@ class UpdateCheckTimerCancelledOnCloseTestCase(unittest.TestCase):
             pass
 
     def _new_app(self):
-        with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
-            return CoffreApp(self.root)
+        # Stub du dialogue modal : voir GuiTestCase.setUp.
+        with patch.object(gui, "_avertir_si_coffre_ailleurs"):
+            with patch.object(gui, "_data_dir", return_value=self.tmp_dir):
+                return CoffreApp(self.root)
 
     def test_the_update_check_job_id_is_tracked_after_startup(self):
         app = self._new_app()
@@ -1304,7 +1317,22 @@ class DataDirResolutionTestCase(unittest.TestCase):
     variable d'environnement %APPDATA% explicitement (celle que Windows
     expose lui-meme) plutot qu'en la reconstruisant depuis Path.home()
     (%USERPROFILE%) - les deux peuvent diverger sur une machine geree en
-    entreprise ou %APPDATA% est redirige."""
+    entreprise ou %APPDATA% est redirige.
+
+    Depuis 2026-08-17, %APPDATA% n'est plus que le DERNIER recours : une cle
+    amovible etiquetee COFFRE le precede. Ces tests-la neutralisent donc la
+    detection de cle (sans quoi leur resultat dependrait de ce qui est
+    branche sur la machine qui les execute) et sont completes plus bas par
+    RemovableVaultDirTestCase."""
+
+    def setUp(self):
+        sans_cle = patch.object(gui, "_removable_vault_dir", return_value=None)
+        sans_cle.start()
+        self.addCleanup(sans_cle.stop)
+        sans_surcharge = patch.dict(os.environ, {}, clear=False)
+        sans_surcharge.start()
+        self.addCleanup(sans_surcharge.stop)
+        os.environ.pop("COFFRE_DATA_DIR", None)
 
     def test_uses_the_appdata_environment_variable_when_present(self):
         with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
@@ -1329,6 +1357,125 @@ class DataDirResolutionTestCase(unittest.TestCase):
     def test_always_returns_a_coffre_subfolder(self):
         with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
             self.assertEqual(gui._data_dir().name, "Coffre")
+
+
+class RemovableVaultDirTestCase(unittest.TestCase):
+    """Le coffre doit pouvoir vivre sur une cle USB plutot que dans le profil
+    Windows, et la cle doit etre reconnue par son ETIQUETTE, jamais par sa
+    lettre : Windows reattribue les lettres a chaque branchement."""
+
+    def test_a_labelled_removable_key_wins_over_appdata(self):
+        with patch.object(gui, "_removable_vault_dir", return_value=Path(r"G:\Coffre")):
+            with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
+                os.environ.pop("COFFRE_DATA_DIR", None)
+                self.assertEqual(gui._data_dir(), Path(r"G:\Coffre"))
+
+    def test_falls_back_to_appdata_when_no_key_is_plugged_in(self):
+        with patch.object(gui, "_removable_vault_dir", return_value=None):
+            with patch.dict(os.environ, {"APPDATA": r"C:\FakeAppData"}):
+                os.environ.pop("COFFRE_DATA_DIR", None)
+                self.assertEqual(gui._data_dir(), Path(r"C:\FakeAppData") / "Coffre")
+
+    def test_the_explicit_override_beats_everything(self):
+        # Sert aussi de porte de sortie si la detection se trompe (deux cles
+        # portant la meme etiquette, par exemple).
+        with patch.object(gui, "_removable_vault_dir", return_value=Path(r"G:\Coffre")):
+            with patch.dict(os.environ, {"COFFRE_DATA_DIR": r"X:\Ailleurs", "APPDATA": r"C:\FakeAppData"}):
+                self.assertEqual(gui._data_dir(), Path(r"X:\Ailleurs"))
+
+    def test_ignores_a_removable_drive_whose_label_does_not_match(self):
+        # Une cle de sauvegarde branchee a cote ne doit pas etre prise pour le
+        # coffre : c'est le scenario ou l'on ouvrirait le mauvais fichier.
+        faux_kernel = MagicMock()
+        faux_kernel.GetLogicalDrives.return_value = 1 << 6  # G:
+        faux_kernel.GetDriveTypeW.return_value = 2  # DRIVE_REMOVABLE
+
+        def remplir(_racine, buf, *_reste):
+            buf.value = "SAUVEGARDES"
+            return 1
+
+        faux_kernel.GetVolumeInformationW.side_effect = remplir
+        with patch.object(gui.sys, "platform", "win32"):
+            with patch.object(gui.ctypes, "windll", MagicMock(kernel32=faux_kernel)):
+                self.assertIsNone(gui._removable_vault_dir())
+
+    def test_warns_when_an_older_vault_remains_in_appdata(self):
+        # Le scenario redoute : la cle est branchee, elle ne porte pas encore
+        # de coffre, et l'utilisateur en a un dans %APPDATA%. Ouvrir sans rien
+        # dire lui ferait croire que ses mots de passe ont disparu.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ancien = Path(tmp) / "Coffre"
+            ancien.mkdir()
+            (ancien / "coffre.sqlite").write_bytes(b"SQLite format 3\x00")
+            vide = Path(tmp) / "SurLaCle"
+            vide.mkdir()
+            with patch.dict(os.environ, {"APPDATA": tmp}):
+                with patch.object(gui.messagebox, "showwarning") as alerte:
+                    gui._avertir_si_coffre_ailleurs(vide)
+            alerte.assert_called_once()
+            self.assertIn(str(ancien), alerte.call_args[0][1])
+
+    def test_stays_silent_when_a_vault_already_exists_at_the_target(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cible = Path(tmp) / "SurLaCle"
+            cible.mkdir()
+            (cible / "coffre.sqlite").write_bytes(b"SQLite format 3\x00")
+            ancien = Path(tmp) / "Coffre"
+            ancien.mkdir()
+            (ancien / "coffre.sqlite").write_bytes(b"SQLite format 3\x00")
+            with patch.dict(os.environ, {"APPDATA": tmp}):
+                with patch.object(gui.messagebox, "showwarning") as alerte:
+                    gui._avertir_si_coffre_ailleurs(cible)
+            alerte.assert_not_called()
+
+    def test_stays_silent_on_a_first_run_with_no_vault_anywhere(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vide = Path(tmp) / "SurLaCle"
+            vide.mkdir()
+            with patch.dict(os.environ, {"APPDATA": tmp}):
+                with patch.object(gui.messagebox, "showwarning") as alerte:
+                    gui._avertir_si_coffre_ailleurs(vide)
+            alerte.assert_not_called()
+
+    @staticmethod
+    def _kernel_simule(bit, etiquette):
+        faux = MagicMock()
+        faux.GetLogicalDrives.return_value = 1 << bit
+        faux.GetDriveTypeW.return_value = 2  # DRIVE_REMOVABLE
+
+        def remplir(_racine, buf, *_reste):
+            buf.value = etiquette
+            return 1
+
+        faux.GetVolumeInformationW.side_effect = remplir
+        return faux
+
+    def test_finds_the_key_whatever_letter_windows_assigned(self):
+        for bit, lettre in ((6, "G"), (10, "K")):
+            with self.subTest(lettre=lettre):
+                faux = self._kernel_simule(bit, "coffre")  # casse indifferente
+                with patch.object(gui.sys, "platform", "win32"):
+                    with patch.object(gui.ctypes, "windll", MagicMock(kernel32=faux)):
+                        with patch.object(gui.Path, "is_dir", return_value=True):
+                            self.assertEqual(
+                                gui._removable_vault_dir(), Path(f"{lettre}:\\") / "Coffre"
+                            )
+
+    def test_stays_inactive_until_the_coffre_folder_is_created_on_the_key(self):
+        # Activation explicite : Coffre etant publie, une cle nommee COFFRE ne
+        # doit PAS suffire a faire demenager le coffre de quelqu'un. Le dossier
+        # doit avoir ete cree volontairement.
+        faux = self._kernel_simule(6, "COFFRE")
+        with patch.object(gui.sys, "platform", "win32"):
+            with patch.object(gui.ctypes, "windll", MagicMock(kernel32=faux)):
+                with patch.object(gui.Path, "is_dir", return_value=False):
+                    self.assertIsNone(gui._removable_vault_dir())
 
 
 class TreeviewColumnRedistributionTestCase(GuiTestCase):

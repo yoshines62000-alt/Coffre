@@ -31,6 +31,7 @@ def _now_iso() -> str:
 # avec un profil itinerant (roaming profile) impose par une politique de
 # groupe d'entreprise, ou %APPDATA% est physiquement un partage reseau.
 DRIVE_REMOTE = 4  # valeur retournee par GetDriveTypeW pour un lecteur reseau mappe
+DRIVE_REMOVABLE = 2  # cle USB, carte SD -- retirable A CHAUD, d'ou le meme traitement
 
 
 def _is_network_path(path: Path) -> bool:
@@ -69,6 +70,33 @@ def _is_network_path(path: Path) -> bool:
     return False
 
 
+def _is_removable_path(path: Path) -> bool:
+    """Le coffre reside-t-il sur un support AMOVIBLE (cle USB, carte SD) ?
+
+    Meme conclusion que pour le reseau, pour une raison differente et plus
+    brutale : en mode WAL la base vit dans TROIS fichiers (.sqlite, -wal,
+    -shm) qui doivent rester coherents entre eux. Sur un support qu'on peut
+    debrancher a chaud -- et qu'on debranche, c'est sa raison d'etre -- un
+    retrait entre le commit dans le -wal et son report dans la base perd les
+    dernieres ecritures, voire rend l'ensemble illisible. Le mode journal par
+    defaut n'ecrit que dans deux fichiers et se recupere seul.
+
+    Ces cles sont en outre presque toujours en FAT32, qui n'a aucune
+    journalisation de metadonnees : une coupure pendant une ecriture abime la
+    table d'allocation, pas seulement le fichier en cours.
+
+    Best-effort comme _is_network_path : au moindre doute, on repond False
+    plutot que d'empecher l'ouverture du coffre."""
+    try:
+        if sys.platform == "win32":
+            drive = path.drive
+            if drive:
+                return ctypes.windll.kernel32.GetDriveTypeW(f"{drive}\\") == DRIVE_REMOVABLE
+    except Exception:
+        pass
+    return False
+
+
 class Database:
     """Enveloppe fine autour de sqlite3 : une connexion, un schema, des
     methodes CRUD explicites. Pas d'ORM."""
@@ -87,7 +115,11 @@ class Database:
         # fichiers. is_network_storage est expose pour permettre a
         # l'appelant (gui.py) d'en informer l'utilisateur s'il le souhaite.
         self.is_network_storage = _is_network_path(self.path)
-        if not self.is_network_storage:
+        # Ajout 2026-08-17 : meme traitement pour les supports amovibles. Le
+        # coffre peut desormais vivre sur une cle USB (voir gui._data_dir), et
+        # WAL y est un mauvais pari -- cf. _is_removable_path.
+        self.is_removable_storage = _is_removable_path(self.path)
+        if not self.is_network_storage and not self.is_removable_storage:
             # Les ecritures (add_entry/update_entry, appelees a chaque
             # frappe validee dans la GUI) commitent dans un fichier journal
             # a part (-wal) plutot que d'ecrire directement dans la base et

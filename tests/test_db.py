@@ -355,8 +355,23 @@ class WalDisabledOnNetworkPathTestCase(unittest.TestCase):
         database = Database(self.tmp / "local.sqlite")
         self.addCleanup(database.close)
         self.assertFalse(database.is_network_storage)
+        self.assertFalse(database.is_removable_storage)
         mode = database.conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode.lower(), "wal")
+
+    def test_wal_is_disabled_on_a_removable_drive(self):
+        # Ajout 2026-08-17 : le coffre peut desormais vivre sur une cle USB
+        # (gui._removable_vault_dir). En mode WAL la base vit dans trois
+        # fichiers qui doivent rester coherents ; sur un support qu'on
+        # debranche a chaud -- et qu'on debranche, c'est son usage -- un
+        # retrait au mauvais moment perd les dernieres ecritures.
+        with patch.object(db, "_is_removable_path", return_value=True):
+            database = Database(self.tmp / "cle.sqlite")
+        self.addCleanup(database.close)
+        mode = database.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        self.assertNotEqual(mode.lower(), "wal")
+        self.assertTrue(database.is_removable_storage)
+        self.assertFalse(database.is_network_storage)
 
     def test_busy_timeout_stays_active_even_when_wal_is_disabled(self):
         # busy_timeout protege contre un SQLITE_BUSY immediat (ex:

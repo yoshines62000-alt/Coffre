@@ -69,7 +69,76 @@ def _resource_path(relative: str) -> Path:
     return base / relative
 
 
+REMOVABLE_VAULT_LABEL = "COFFRE"
+_DRIVE_REMOVABLE = 2  # GetDriveTypeW
+
+
+def _removable_vault_dir() -> Path | None:
+    """Cherche une cle USB / carte SD dont l'ETIQUETTE de volume vaut
+    REMOVABLE_VAULT_LABEL, et renvoie le dossier de coffre qu'elle porte.
+
+    On identifie le support par son ETIQUETTE, jamais par sa lettre. Une
+    lettre de lecteur est attribuee par Windows au branchement : elle change
+    d'un poste a l'autre, et meme d'un rebranchement a l'autre sur le meme
+    poste. Coder « G: » en dur donnerait un coffre introuvable un jour sur
+    deux, ou -- pire -- ferait ouvrir le coffre d'une AUTRE cle qui aurait
+    herite de la lettre.
+
+    ACTIVATION EXPLICITE : le sous-dossier "Coffre" doit DEJA exister a la racine
+    de la cle. Sans cette condition, Coffre est publie publiquement et un
+    utilisateur qui nomme « COFFRE » une cle quelconque -- nom tres naturel
+    pour qui se sert d'un gestionnaire de mots de passe -- verrait son coffre
+    demenager sans l'avoir demande. Creer le dossier soi-meme est le geste
+    qui declare l'intention ; tant qu'il n'existe pas, rien ne change.
+
+    Renvoie None si aucune cle correspondante n'est branchee, auquel cas
+    l'appelant retombe sur %APPDATA% (comportement historique).
+
+    Best-effort : toute erreur d'API est traitee comme « pas de cle ».
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        kernel32 = ctypes.windll.kernel32
+        masque = kernel32.GetLogicalDrives()
+        for i in range(26):
+            if not masque & (1 << i):
+                continue
+            racine = f"{chr(ord('A') + i)}:\\"
+            if kernel32.GetDriveTypeW(racine) != _DRIVE_REMOVABLE:
+                continue
+            nom = ctypes.create_unicode_buffer(261)
+            # Une cle retiree entre GetLogicalDrives et cet appel renvoie 0 :
+            # on l'ignore simplement.
+            if not kernel32.GetVolumeInformationW(racine, nom, 261, None, None, None, None, 0):
+                continue
+            if nom.value.strip().upper() != REMOVABLE_VAULT_LABEL:
+                continue
+            dossier = Path(racine) / "Coffre"
+            if dossier.is_dir():
+                return dossier
+    except Exception:
+        pass
+    return None
+
+
 def _data_dir() -> Path:
+    # Ordre de resolution (ajout 2026-08-17) :
+    #   1. COFFRE_DATA_DIR   -- surcharge explicite, sert aussi aux tests
+    #   2. cle amovible etiquetee COFFRE -- le coffre voyage avec l'utilisateur
+    #      et ne laisse RIEN sur le PC hote
+    #   3. %APPDATA%\Coffre  -- comportement historique, repli si aucune cle
+    #
+    # ATTENTION au point 3 : si la cle n'est pas branchee, Coffre ouvrira (ou
+    # creera) un coffre LOCAL, distinct de celui de la cle. C'est deliberement
+    # non bloquant -- on ne veut pas empecher le demarrage -- mais l'utilisateur
+    # doit comprendre que ce sont deux coffres separes, pas une synchronisation.
+    surcharge = os.environ.get("COFFRE_DATA_DIR")
+    if surcharge:
+        return Path(surcharge)
+    cle = _removable_vault_dir()
+    if cle is not None:
+        return cle
     # Audit B3 : resout explicitement via la variable d'environnement
     # %APPDATA% - celle que Windows expose lui-meme et que l'Explorateur/
     # les autres applications utilisent - plutot que de la reconstruire a
@@ -86,6 +155,55 @@ def _data_dir() -> Path:
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / "Coffre"
+
+
+def _legacy_appdata_vault() -> Path | None:
+    """Chemin de l'ancien coffre dans %APPDATA%, s'il existe reellement."""
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    ancien = base / "Coffre" / "coffre.sqlite"
+    try:
+        return ancien if ancien.is_file() else None
+    except OSError:
+        return None
+
+
+def _avertir_si_coffre_ailleurs(dossier: Path) -> None:
+    """Previent quand Coffre s'apprete a ouvrir un coffre VIDE alors qu'un
+    autre existe dans %APPDATA%.
+
+    Sans ce garde-fou, brancher (ou oublier de brancher) la cle change
+    silencieusement de coffre : l'utilisateur voit une liste vide et en
+    conclut que ses mots de passe ont disparu, alors qu'ils sont intacts a
+    l'ancien emplacement. C'est exactement le mode de defaillance qu'on veut
+    eviter sur un gestionnaire de secrets -- une panne silencieuse y coute
+    infiniment plus cher qu'un message de trop.
+
+    Purement informatif : on ne deplace RIEN automatiquement. Deplacer un
+    coffre est une decision de l'utilisateur, pas un effet de bord."""
+    try:
+        cible = dossier / "coffre.sqlite"
+        if cible.is_file():
+            return  # un coffre existe deja ici : rien a signaler
+        ancien = _legacy_appdata_vault()
+        if ancien is None or ancien.parent == dossier:
+            return
+        messagebox.showwarning(
+            APP_TITLE,
+            "Aucun coffre a l'emplacement actuel :\n"
+            f"{dossier}\n\n"
+            "Mais un coffre existe encore ici :\n"
+            f"{ancien.parent}\n\n"
+            "Continuer va CREER UN NOUVEAU coffre, vide et distinct de "
+            "l'ancien. Vos mots de passe ne sont pas perdus : ils sont dans "
+            "l'autre dossier.\n\n"
+            "Pour les recuperer, fermez Coffre et deplacez le fichier "
+            "coffre.sqlite vers le nouvel emplacement.",
+        )
+    except Exception:
+        # Un avertissement qui plante empecherait l'ouverture du coffre :
+        # inacceptable pour un simple confort de diagnostic.
+        pass
 
 
 def _is_valid_length_input(value: str) -> bool:
@@ -231,6 +349,7 @@ class CoffreApp:
         # utilisateur dependant d'un lecteur d'ecran le decouvrir seul.
         opl_theme.apply(self.root, "Coffre")
 
+        _avertir_si_coffre_ailleurs(_data_dir())
         try:
             self.vault = Vault(_data_dir() / "coffre.sqlite")
         except Exception as exc:
