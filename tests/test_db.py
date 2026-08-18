@@ -359,6 +359,23 @@ class WalDisabledOnNetworkPathTestCase(unittest.TestCase):
         mode = database.conn.execute("PRAGMA journal_mode").fetchone()[0]
         self.assertEqual(mode.lower(), "wal")
 
+    def test_a_wal_database_moved_onto_a_key_is_CONVERTED_not_just_left_alone(self):
+        # REGRESSION 2026-08-18. Premier correctif incomplet : il se contentait
+        # de ne PAS executer `PRAGMA journal_mode=WAL` sur support amovible. Or
+        # journal_mode est une propriete PERSISTANTE du fichier : une base creee
+        # en WAL sur le disque local le reste apres copie sur une cle, et SQLite
+        # y recree -wal/-shm. Constate en vrai sur G:\Coffre apres migration.
+        local = Database(self.tmp / "local.sqlite")
+        self.assertEqual(local.conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal")
+        local.close()
+        with patch.object(db, "_is_removable_path", return_value=True):
+            sur_cle = Database(self.tmp / "local.sqlite")  # MEME fichier, deja en WAL
+        self.addCleanup(sur_cle.close)
+        self.assertNotEqual(
+            sur_cle.conn.execute("PRAGMA journal_mode").fetchone()[0].lower(), "wal",
+            "une base deja en WAL doit etre CONVERTIE quand elle atterrit sur un amovible",
+        )
+
     def test_wal_is_disabled_on_a_removable_drive(self):
         # Ajout 2026-08-17 : le coffre peut desormais vivre sur une cle USB
         # (gui._removable_vault_dir). En mode WAL la base vit dans trois

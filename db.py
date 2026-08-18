@@ -119,7 +119,16 @@ class Database:
         # coffre peut desormais vivre sur une cle USB (voir gui._data_dir), et
         # WAL y est un mauvais pari -- cf. _is_removable_path.
         self.is_removable_storage = _is_removable_path(self.path)
-        if not self.is_network_storage and not self.is_removable_storage:
+        if self.is_network_storage or self.is_removable_storage:
+            # NE PAS se contenter de sauter le PRAGMA ci-dessous : journal_mode est
+            # une propriete PERSISTANTE du fichier. Une base creee en WAL sur un
+            # disque local le RESTE apres avoir ete copiee sur une cle USB -- et
+            # SQLite y recree alors -wal et -shm au premier acces. C'est
+            # exactement ce qui s'est produit en deplacant le coffre vers la cle
+            # le 2026-08-18 : les trois fichiers etaient bien la, malgre le test
+            # d'amovibilite. Il faut convertir explicitement.
+            self.conn.execute("PRAGMA journal_mode=DELETE")
+        else:
             # Les ecritures (add_entry/update_entry, appelees a chaque
             # frappe validee dans la GUI) commitent dans un fichier journal
             # a part (-wal) plutot que d'ecrire directement dans la base et
