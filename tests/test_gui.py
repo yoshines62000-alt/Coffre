@@ -1383,21 +1383,63 @@ class RemovableVaultDirTestCase(unittest.TestCase):
             with patch.dict(os.environ, {"COFFRE_DATA_DIR": r"X:\Ailleurs", "APPDATA": r"C:\FakeAppData"}):
                 self.assertEqual(gui._data_dir(), Path(r"X:\Ailleurs"))
 
-    def test_ignores_a_removable_drive_whose_label_does_not_match(self):
-        # Une cle de sauvegarde branchee a cote ne doit pas etre prise pour le
-        # coffre : c'est le scenario ou l'on ouvrirait le mauvais fichier.
-        faux_kernel = MagicMock()
-        faux_kernel.GetLogicalDrives.return_value = 1 << 6  # G:
-        faux_kernel.GetDriveTypeW.return_value = 2  # DRIVE_REMOVABLE
+    @staticmethod
+    def _kernel_multi(lecteurs):
+        """Simule plusieurs amovibles. `lecteurs` : {bit: etiquette}."""
+        faux = MagicMock()
+        masque = 0
+        for bit in lecteurs:
+            masque |= 1 << bit
+        faux.GetLogicalDrives.return_value = masque
+        faux.GetDriveTypeW.return_value = 2  # DRIVE_REMOVABLE
 
-        def remplir(_racine, buf, *_reste):
-            buf.value = "SAUVEGARDES"
+        def remplir(racine, buf, *_reste):
+            bit = ord(str(racine)[0].upper()) - ord("A")
+            buf.value = lecteurs.get(bit, "")
             return 1
 
-        faux_kernel.GetVolumeInformationW.side_effect = remplir
-        with patch.object(gui.sys, "platform", "win32"):
-            with patch.object(gui.ctypes, "windll", MagicMock(kernel32=faux_kernel)):
-                self.assertIsNone(gui._removable_vault_dir())
+        faux.GetVolumeInformationW.side_effect = remplir
+        return faux
+
+    def _avec(self, kernel, dossiers_existants):
+        """Contexte : kernel simule + is_dir vrai pour les seuls chemins donnes."""
+        attendus = {str(Path(d)) for d in dossiers_existants}
+        return (
+            patch.object(gui.sys, "platform", "win32"),
+            patch.object(gui.ctypes, "windll", MagicMock(kernel32=kernel)),
+            patch.object(gui.Path, "is_dir", lambda self: str(self) in attendus),
+        )
+
+    def test_a_drive_without_the_coffre_folder_is_ignored_whatever_its_label(self):
+        # L'activation reste explicite : sans dossier Coffre, on ne touche a rien
+        # -- meme si la cle porte precisement l'etiquette attendue.
+        k = self._kernel_multi({6: "COFFRE"})
+        p1, p2, p3 = self._avec(k, [])
+        with p1, p2, p3:
+            self.assertIsNone(gui._removable_vault_dir())
+
+    def test_a_single_key_is_used_even_if_its_label_differs(self):
+        # Changement 2026-08-18 : l'etiquette ne conditionne plus la detection.
+        # Cas reel : tout regroupe sur une cle nommee COCKPIT -- le coffre y
+        # etait devenu introuvable tant que l'etiquette faisait loi.
+        k = self._kernel_multi({6: "COCKPIT"})
+        p1, p2, p3 = self._avec(k, ["G:\\Coffre"])
+        with p1, p2, p3:
+            self.assertEqual(gui._removable_vault_dir(), Path("G:\\Coffre"))
+
+    def test_when_several_keys_carry_a_vault_the_labelled_one_wins(self):
+        k = self._kernel_multi({4: "COCKPIT", 6: "COFFRE"})
+        p1, p2, p3 = self._avec(k, ["E:\\Coffre", "G:\\Coffre"])
+        with p1, p2, p3:
+            self.assertEqual(gui._removable_vault_dir(), Path("G:\\Coffre"))
+
+    def test_when_several_keys_carry_a_vault_and_none_is_labelled_we_REFUSE(self):
+        # Ouvrir le mauvais coffre -- ou pire, en creer un neuf par-dessus -- ne
+        # se rattrape pas. On prefere retomber sur %APPDATA% avec avertissement.
+        k = self._kernel_multi({4: "SAUVEGARDES", 6: "PROJETS"})
+        p1, p2, p3 = self._avec(k, ["E:\\Coffre", "G:\\Coffre"])
+        with p1, p2, p3:
+            self.assertIsNone(gui._removable_vault_dir())
 
     def test_warns_when_an_older_vault_remains_in_appdata(self):
         # Le scenario redoute : la cle est branchee, elle ne porte pas encore

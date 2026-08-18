@@ -74,25 +74,32 @@ _DRIVE_REMOVABLE = 2  # GetDriveTypeW
 
 
 def _removable_vault_dir() -> Path | None:
-    """Cherche une cle USB / carte SD dont l'ETIQUETTE de volume vaut
-    REMOVABLE_VAULT_LABEL, et renvoie le dossier de coffre qu'elle porte.
+    """Cherche une cle USB / carte SD portant un dossier "Coffre" et renvoie ce
+    dossier.
 
-    On identifie le support par son ETIQUETTE, jamais par sa lettre. Une
-    lettre de lecteur est attribuee par Windows au branchement : elle change
-    d'un poste a l'autre, et meme d'un rebranchement a l'autre sur le meme
-    poste. Coder « G: » en dur donnerait un coffre introuvable un jour sur
-    deux, ou -- pire -- ferait ouvrir le coffre d'une AUTRE cle qui aurait
-    herite de la lettre.
+    On identifie le support par son CONTENU, jamais par sa lettre. Une lettre de
+    lecteur est attribuee par Windows au branchement : elle change d'un poste a
+    l'autre, et meme d'un rebranchement a l'autre sur le meme poste. Coder
+    « G: » en dur donnerait un coffre introuvable un jour sur deux, ou -- pire --
+    ferait ouvrir le coffre d'une AUTRE cle qui aurait herite de la lettre.
 
     ACTIVATION EXPLICITE : le sous-dossier "Coffre" doit DEJA exister a la racine
-    de la cle. Sans cette condition, Coffre est publie publiquement et un
-    utilisateur qui nomme « COFFRE » une cle quelconque -- nom tres naturel
-    pour qui se sert d'un gestionnaire de mots de passe -- verrait son coffre
-    demenager sans l'avoir demande. Creer le dossier soi-meme est le geste
-    qui declare l'intention ; tant qu'il n'existe pas, rien ne change.
+    de la cle. Coffre etant publie publiquement, il ne doit jamais deplacer le
+    coffre de quelqu'un sans qu'il l'ait demande ; creer ce dossier soi-meme est
+    le geste qui declare l'intention. Tant qu'il n'existe pas, rien ne change.
 
-    Renvoie None si aucune cle correspondante n'est branchee, auquel cas
-    l'appelant retombe sur %APPDATA% (comportement historique).
+    L'ETIQUETTE ne conditionne plus la detection (2026-08-18) : elle ne sert plus
+    qu'a DEPARTAGER si plusieurs cles portent un dossier "Coffre". L'exiger
+    empechait de regrouper le coffre sur une cle nommee autrement -- cas reel :
+    une cle « COCKPIT » rassemblant tout, ou le coffre devenait introuvable.
+
+    AMBIGUITE : si plusieurs cles portent un dossier "Coffre" et qu'aucune ne
+    porte l'etiquette, on renvoie None plutot que d'en choisir une au hasard.
+    Ouvrir le mauvais coffre -- ou pire, en creer un neuf par-dessus -- ne se
+    rattrape pas.
+
+    Renvoie None si rien de sur n'est trouve, auquel cas l'appelant retombe sur
+    %APPDATA% (comportement historique) apres avertissement.
 
     Best-effort : toute erreur d'API est traitee comme « pas de cle ».
     """
@@ -101,22 +108,30 @@ def _removable_vault_dir() -> Path | None:
     try:
         kernel32 = ctypes.windll.kernel32
         masque = kernel32.GetLogicalDrives()
+        candidats: list[tuple[Path, bool]] = []  # (dossier, porte l'etiquette)
         for i in range(26):
             if not masque & (1 << i):
                 continue
             racine = f"{chr(ord('A') + i)}:\\"
             if kernel32.GetDriveTypeW(racine) != _DRIVE_REMOVABLE:
                 continue
+            dossier = Path(racine) / "Coffre"
+            if not dossier.is_dir():
+                continue
             nom = ctypes.create_unicode_buffer(261)
             # Une cle retiree entre GetLogicalDrives et cet appel renvoie 0 :
-            # on l'ignore simplement.
-            if not kernel32.GetVolumeInformationW(racine, nom, 261, None, None, None, None, 0):
-                continue
-            if nom.value.strip().upper() != REMOVABLE_VAULT_LABEL:
-                continue
-            dossier = Path(racine) / "Coffre"
-            if dossier.is_dir():
-                return dossier
+            # on la garde comme candidate, simplement sans etiquette connue.
+            etiquete = bool(
+                kernel32.GetVolumeInformationW(racine, nom, 261, None, None, None, None, 0)
+            ) and nom.value.strip().upper() == REMOVABLE_VAULT_LABEL
+            candidats.append((dossier, etiquete))
+        if len(candidats) == 1:
+            return candidats[0][0]
+        if len(candidats) > 1:
+            etiquetes = [d for d, e in candidats if e]
+            if len(etiquetes) == 1:
+                return etiquetes[0]
+            return None  # ambigu : on refuse plutot que de deviner
     except Exception:
         pass
     return None
