@@ -413,7 +413,7 @@ class CoffreApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "Coffre", "Gestionnaire de mots de passe", on_contact=lambda: opl_contact.ouvrir(self.root, app="Coffre", version=APP_VERSION)).pack(fill="x", side="top")
+        opl_theme.entete(self.root, "Coffre", "Gestionnaire de mots de passe", on_contact=lambda: opl_contact.ouvrir(self.root, app="Coffre", version=APP_VERSION), slug="coffre", version=APP_VERSION).pack(fill="x", side="top")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
