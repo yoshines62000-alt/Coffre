@@ -130,6 +130,28 @@ python -m pip install -r requirements.txt
   systèmes de fichiers réseau) au profit du mode journal par défaut, plus
   lent mais dont le verrouillage est mieux supporté sur ce type de stockage.
 
+## Mes données — si Coffre ne se lance plus
+
+Le coffre est un fichier SQLite (`coffre.sqlite`) chiffré avec un algorithme public
+(scrypt + AES-256-GCM). Si un jour l'exécutable refuse de démarrer — Windows qui bloque,
+antivirus, changement de machine —, **le fichier reste lisible avec Python seul**, sans
+Coffre et sans rien installer :
+
+```bash
+python secours_coffre.py "chemin\vers\coffre.sqlite" --json mes-mots-de-passe.json
+```
+
+Le mot de passe maître est demandé sans écho. Le script n'écrit **jamais** dans le coffre
+(ouvert en lecture seule) ; il refuse un mot de passe faux ou un fichier altéré sans rien
+rendre ; et il n'utilise que la bibliothèque standard de Python — l'AES-256-GCM y est
+réimplémenté et **prouvé identique** à celui de l'application par les tests
+(`tests/test_secours_coffre.py`, sur de vrais coffres).
+
+⚠️ L'export est **en clair** : récupérez ce qu'il vous faut, puis supprimez le fichier.
+
+Où est le coffre : sur la clé USB étiquetée `COFFRE` si vous en utilisez une (dossier
+`Coffre\`), sinon dans `%APPDATA%\Coffre\`.
+
 ## Limites connues
 
 Par honnêteté envers les utilisateurs, plutôt que de laisser ces limites se
