@@ -45,8 +45,10 @@ import csv
 import getpass
 import hashlib
 import json
+import os
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 VERIFIER = b"coffre-verifier-v1"
@@ -254,16 +256,55 @@ def lire_coffre(chemin: Path, mot_de_passe: str) -> list:
         conn.close()
 
 
+#: Caracteres par lesquels Excel/LibreOffice reconnaissent une FORMULE. Un mot
+#: de passe commencant par « - » ou « = » n'a rien d'exotique, et ce CSV est
+#: fait pour etre ouvert dans un tableur (CWE-1236, audit du 2026-08-26).
+_PREFIXES_FORMULE = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_sur(valeur):
+    """Prefixe d'une apostrophe une cellule que le tableur lirait comme une
+    formule. Le contenu reste lisible ; il cesse d'etre executable."""
+    if isinstance(valeur, str) and valeur.startswith(_PREFIXES_FORMULE):
+        return "'" + valeur
+    return valeur
+
+
+def _ecrire_atomiquement(sortie: Path, ecrire) -> None:
+    """Ecrit par un fichier temporaire voisin, puis bascule d'un seul coup.
+    Sans cela, une erreur en cours d'ecriture (disque plein, cle retiree)
+    laissait a l'emplacement final un fichier de MOTS DE PASSE EN CLAIR
+    tronque, qu'on pouvait prendre pour un export complet. En cas d'echec, le
+    temporaire est supprime : jamais de fragment de secret abandonne."""
+    sortie = Path(sortie)
+    sortie.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(sortie.parent), prefix="." + sortie.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            ecrire(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, sortie)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def exporter_json(entrees: list, sortie: Path) -> None:
-    Path(sortie).write_text(json.dumps(entrees, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _ecrire_atomiquement(
+        sortie, lambda f: f.write(json.dumps(entrees, ensure_ascii=False, indent=2) + "\n"))
 
 
 def exporter_csv(entrees: list, sortie: Path) -> None:
-    with open(sortie, "w", encoding="utf-8", newline="") as f:
+    def ecrire(f):
         w = csv.DictWriter(f, fieldnames=list(CHAMPS))
         w.writeheader()
         for e in entrees:
-            w.writerow(e)
+            w.writerow({c: _csv_sur(e.get(c, "")) for c in CHAMPS})
+    _ecrire_atomiquement(sortie, ecrire)
 
 
 def main(argv=None) -> int:
