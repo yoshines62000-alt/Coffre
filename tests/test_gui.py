@@ -458,6 +458,46 @@ class AutoLockWarningTestCase(GuiTestCase):
         self.assertFalse(dialog.winfo_exists(), "le verrouillage reel doit fermer de force les dialogues ouverts")
 
 
+class EtatVideTestCase(GuiTestCase):
+    """Une liste vide ne doit pas etre un rectangle blanc (refonte 2026-08-26)."""
+
+    def test_un_coffre_sans_entree_propose_d_en_ajouter_une(self):
+        self.app._refresh_entries()
+        self.assertIsNotNone(self.app._etat_vide, "l'etat vide doit s'afficher")
+        textes = _tous_les_textes(self.app._etat_vide)
+        self.assertIn("Votre coffre est vide", textes)
+        self.assertIn("Ajouter une entree", textes, "il doit proposer l'action, pas seulement constater")
+
+    def test_une_recherche_sans_resultat_ne_dit_PAS_que_le_coffre_est_vide(self):
+        """Les confondre dirait a l'utilisateur qu'il a tout perdu."""
+        self.app.vault.add_entry("github.com", "john", "secret")
+        self.app.search_var.set("introuvable-xyz")
+        self.app._refresh_entries()
+        self.assertIsNotNone(self.app._etat_vide)
+        textes = _tous_les_textes(self.app._etat_vide)
+        self.assertIn("Aucun resultat", textes)
+        self.assertNotIn("Votre coffre est vide", textes)
+        self.assertNotIn("Ajouter une entree", textes, "il n'y a rien a creer : il faut effacer la recherche")
+
+    def test_des_qu_une_entree_correspond_l_etat_vide_disparait(self):
+        """Contre-epreuve : sans elle, un etat vide toujours affiche passerait."""
+        self.app.vault.add_entry("github.com", "john", "secret")
+        self.app.search_var.set("")
+        self.app._refresh_entries()
+        self.assertIsNone(self.app._etat_vide)
+
+
+def _tous_les_textes(widget) -> str:
+    morceaux = []
+    for enfant in widget.winfo_children():
+        try:
+            morceaux.append(str(enfant.cget("text")))
+        except Exception:
+            pass
+        morceaux.append(_tous_les_textes(enfant))
+    return " ".join(morceaux)
+
+
 class ToolbarLayoutTestCase(GuiTestCase):
     """Correctif audit Phase 1 (item 1) : a la taille par defaut de la
     fenetre (900x580, fixee dans CoffreApp.__init__), la toolbar du haut

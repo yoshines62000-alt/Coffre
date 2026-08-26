@@ -833,10 +833,47 @@ class CoffreApp:
     def _refresh_entries(self):
         self.entries_tree.delete(*self.entries_tree.get_children())
         query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        total = 0
         for entry in sorted(self.vault.list_entries(), key=lambda e: e["title"].lower()):
+            total += 1
             if query and query not in entry["title"].lower() and query not in entry["username"].lower() and query not in entry["url"].lower():
                 continue
             self.entries_tree.insert("", END, iid=str(entry["id"]), values=(entry["title"], entry["username"], entry["url"]))
+        self._montrer_etat_vide(affiches=len(self.entries_tree.get_children()), total=total, recherche=query)
+
+    def _montrer_etat_vide(self, *, affiches: int, total: int, recherche: str) -> None:
+        """Une liste vide ne doit pas etre un rectangle blanc.
+
+        Deux situations distinctes, et deux messages : un coffre qui n'a
+        encore rien (on propose d'ajouter) et une recherche sans resultat (on
+        ne propose rien, il n'y a rien a creer — il faut juste effacer la
+        recherche). Les confondre dirait a l'utilisateur que son coffre est
+        vide alors qu'il ne l'est pas.
+
+        L'etat vide est pose EN SUPERPOSITION (place) sur la liste : la mise
+        en page existante n'est pas touchee, donc rien d'autre ne bouge.
+        """
+        if getattr(self, "_etat_vide", None) is not None:
+            self._etat_vide.destroy()
+            self._etat_vide = None
+        if affiches:
+            return
+        if total == 0:
+            cadre = opl_theme.etat_vide(
+                self._vault_body_frame,
+                "Votre coffre est vide",
+                "Ajoutez un site, un identifiant et un mot de passe. Tout reste "
+                "chiffre sur cet ordinateur — rien n'est envoye nulle part.",
+                action=lambda: self._open_entry_dialog(None),
+                libelle="Ajouter une entree")
+        else:
+            cadre = opl_theme.etat_vide(
+                self._vault_body_frame,
+                "Aucun resultat",
+                f"Rien ne correspond a « {recherche} » parmi vos {total} entrees. "
+                "Effacez la recherche pour toutes les revoir.")
+        cadre.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._etat_vide = cadre
 
     # -- ajout / edition d'une entree --------------------------------------------
 
