@@ -548,6 +548,10 @@ class CoffreApp:
         ttk.Label(frame, text="Confirmer le mot de passe maitre", foreground=opl_theme.couleur("texte"), font=BODY_FONT).pack(anchor="w")
         entry2 = ttk.Entry(frame, textvariable=self._create_confirm_var, show="*", width=32)
         entry2.pack(pady=(0, 8))
+        # Sous le champ de confirmation, PAS sous le bouton : ancree sur le
+        # bouton, l'erreur passait derriere les deux avertissements en rouge,
+        # a 99 px du champ (mesure) contre 6 a 45 px partout ailleurs.
+        erreur = opl_theme.Erreur(frame, apres=entry2)
         ttk.Label(
             frame, text="⚠️ Il n'existe AUCUN moyen de recuperer ce mot de passe s'il est",
             foreground=opl_theme.couleur("danger"),
@@ -594,7 +598,6 @@ class CoffreApp:
 
         create_button = ttk.Button(frame, text="Creer le coffre", command=on_create, style="Accent.TButton")
         create_button.pack()
-        erreur = opl_theme.Erreur(frame, apres=create_button)
         self._focus_creation_entry = entry1
         entry1.bind("<Return>", lambda event: entry2.focus_set())
         entry2.bind("<Return>", lambda event: on_create())
