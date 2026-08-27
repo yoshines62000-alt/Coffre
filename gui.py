@@ -426,6 +426,11 @@ class CoffreApp:
         self.update_status_var = StringVar(value="")
         self.update_status_label = ttk.Label(bottom_bar, textvariable=self.update_status_var, foreground=opl_theme.couleur("texte_doux"))
         self.update_status_label.pack(side=LEFT, padx=(6, 0), pady=4)
+        # Ce qui s'est passe, SANS arreter l'utilisateur : un tiers des
+        # boites de cette suite ne posaient aucune question et n'annoncaient
+        # aucun echec — elles coutaient un clic pour dire « Termine ».
+        self.statut = opl_theme.Statut(bottom_bar)
+        self.statut.pack(side=LEFT, padx=(12, 0), pady=4)
         donate_label = ttk.Label(bottom_bar, text="☕ Soutenir le projet", foreground=opl_theme.couleur("lien"), cursor="hand2")
         donate_label.pack(side=RIGHT, padx=8, pady=4)
         donate_label.bind("<Button-1>", lambda event: webbrowser.open(DONATE_URL))
@@ -1082,12 +1087,10 @@ class CoffreApp:
             # invalide, et on poursuit l'enregistrement.
             raw_totp = totp_var.get().strip()
             if raw_totp and not totp_module.is_valid_secret(raw_totp):
-                messagebox.showwarning(
-                    APP_TITLE,
+                self.statut.dire(
                     "Le secret 2FA (TOTP) n'est pas un code base32 valide : il n'a pas ete "
                     "enregistre. Les autres champs, eux, ont bien ete enregistres.",
-                    parent=dialog,
-                )
+                    ton="alerte")
                 totp_value = ""
             else:
                 totp_value = totp_module.normalize_secret(raw_totp) if raw_totp else ""
@@ -1505,7 +1508,9 @@ class CoffreApp:
                 save_button.config(state="normal")
                 self.root.config(cursor="")
             dialog.destroy()
-            messagebox.showinfo(APP_TITLE, "Mot de passe maitre change avec succes.")
+            self.statut.dire(
+                "Mot de passe maitre change avec succes.",
+                ton="succes")
 
         # Audit C3 : ce dialogue n'a pas de widget multi-ligne (contrairement
         # a _open_entry_dialog et ses Notes) - Entree peut donc valider sans

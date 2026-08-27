@@ -820,9 +820,8 @@ class BlockingOperationFeedbackTestCase(unittest.TestCase):
             return real_change(current, new)
 
         with patch.object(app.vault, "change_master_password", side_effect=spying_change):
-            with patch("gui.messagebox.showinfo") as mock_info:
-                button.invoke()
-                self.root.update()
+            button.invoke()
+            self.root.update()
 
         self.assertEqual(observed["button_state"], "disabled", "le bouton doit etre desactive PENDANT l'appel bloquant")
         self.assertEqual(observed["cursor"], "wait", "le curseur d'attente doit etre affiche PENDANT l'appel bloquant")
@@ -831,7 +830,9 @@ class BlockingOperationFeedbackTestCase(unittest.TestCase):
         # apres coup, mais le curseur de la fenetre principale, lui,
         # survit et doit avoir ete restaure a la normale.
         self.assertEqual(str(self.root.cget("cursor")), "", "le curseur doit redevenir normal une fois l'appel termine")
-        mock_info.assert_called_once()
+        # Le succes passe par la barre d'etat depuis la refonte : plus de
+        # boite modale pour annoncer que tout s'est bien passe.
+        self.assertIn("succes", app.statut.cget("text").lower())
         self.assertFalse(dialog.winfo_exists())
 
 
@@ -1261,10 +1262,11 @@ class EnterKeySubmitsFormsTestCase(GuiTestCase):
         confirm_entry.insert(0, "nouveau-mot-de-passe-maitre")
         self.root.update()
 
-        with patch("gui.messagebox.showinfo") as mock_info:
-            _press_return(self.root, confirm_entry)
+        _press_return(self.root, confirm_entry)
 
-        mock_info.assert_called_once()
+        # Le succes ne s'annonce plus par une boite modale mais dans la barre
+        # d'etat : il ne pose aucune question et n'annonce aucun echec.
+        self.assertIn("succes", self.app.statut.cget("text").lower())
         self.assertFalse(dialog.winfo_exists())
         self.assertTrue(
             self.app.vault.unlock("nouveau-mot-de-passe-maitre"),
