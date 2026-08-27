@@ -183,7 +183,7 @@ def _legacy_appdata_vault() -> Path | None:
         return None
 
 
-def _avertir_si_coffre_ailleurs(dossier: Path) -> None:
+def _avertir_si_coffre_ailleurs(dossier: Path, parent: tk.Misc | None = None) -> None:
     """Previent quand Coffre s'apprete a ouvrir un coffre VIDE alors qu'un
     autre existe dans %APPDATA%.
 
@@ -203,8 +203,10 @@ def _avertir_si_coffre_ailleurs(dossier: Path) -> None:
         ancien = _legacy_appdata_vault()
         if ancien is None or ancien.parent == dossier:
             return
-        messagebox.showwarning(
-            APP_TITLE,
+        if parent is None:
+            return  # sans fenetre, rien a afficher : l'appelant a oublie le parent
+        opl_theme.message(
+            parent, "Coffre introuvable",
             "Aucun coffre a l'emplacement actuel :\n"
             f"{dossier}\n\n"
             "Mais un coffre existe encore ici :\n"
@@ -214,7 +216,7 @@ def _avertir_si_coffre_ailleurs(dossier: Path) -> None:
             "l'autre dossier.\n\n"
             "Pour les recuperer, fermez Coffre et deplacez le fichier "
             "coffre.sqlite vers le nouvel emplacement.",
-        )
+            ton="alerte")
     except Exception:
         # Un avertissement qui plante empecherait l'ouverture du coffre :
         # inacceptable pour un simple confort de diagnostic.
@@ -364,7 +366,7 @@ class CoffreApp:
         # utilisateur dependant d'un lecteur d'ecran le decouvrir seul.
         opl_theme.apply(self.root, "Coffre")
 
-        _avertir_si_coffre_ailleurs(_data_dir())
+        _avertir_si_coffre_ailleurs(_data_dir(), self.root)
         try:
             self.vault = Vault(_data_dir() / "coffre.sqlite")
         except Exception as exc:
@@ -373,11 +375,11 @@ class CoffreApp:
             # silencieux au demarrage, sans le moindre message, laisserait
             # l'utilisateur croire que l'application est cassee alors que
             # le probleme vient specifiquement du fichier de donnees.
-            messagebox.showerror(
-                APP_TITLE,
+            opl_theme.message(
+                self.root, "Coffre illisible",
                 "Impossible d'ouvrir le fichier du coffre (fichier corrompu ou "
                 f"illisible) :\n{exc}",
-            )
+                ton="erreur")
             self.root.destroy()
             raise SystemExit(1)
         self._clipboard_pending_value = None
@@ -617,12 +619,12 @@ class CoffreApp:
                 self._unlock_status_var.set("")
                 self._show_vault_screen()
                 if self.vault.corrupted_entry_ids:
-                    messagebox.showwarning(
-                        APP_TITLE,
+                    opl_theme.message(
+                        self.root, "Entrees illisibles",
                         f"{len(self.vault.corrupted_entry_ids)} entree(s) n'ont pas pu etre "
                         "dechiffrees (donnees corrompues) et n'apparaissent pas dans la liste. "
                         "Les autres entrees restent accessibles normalement.",
-                    )
+                        ton="alerte")
             else:
                 self._unlock_status_var.set("Mot de passe incorrect.")
                 self._unlock_password_var.set("")
@@ -1113,7 +1115,10 @@ class CoffreApp:
                 # ici totalement non intercepte - invisible dans l'exe
                 # package sans console (console=False), l'utilisateur
                 # voyait juste le bouton "Enregistrer" ne rien faire.
-                messagebox.showerror(APP_TITLE, f"L'enregistrement a echoue :\n{exc}", parent=dialog)
+                opl_theme.message(
+                    dialog, "Enregistrement impossible",
+                    f"L'enregistrement a echoue :\n{exc}",
+                    ton="erreur")
                 return
             dialog.destroy()
             self._refresh_entries()
@@ -1164,7 +1169,10 @@ class CoffreApp:
             # (aucune gestion d'exception n'entourait _delete_selected_entry
             # avant ce correctif), et le bouton "Supprimer" ne faisait
             # simplement rien de visible.
-            messagebox.showerror(APP_TITLE, f"La suppression a echoue :\n{exc}")
+            opl_theme.message(
+                self.root, "Suppression impossible",
+                f"La suppression a echoue :\n{exc}",
+                ton="erreur")
             return
         self._refresh_entries()
 
@@ -1423,7 +1431,10 @@ class CoffreApp:
             # sqlite3.Error en plus d'OSError : une destination inaccessible
             # (cle USB retiree, dossier en lecture seule) remonte en
             # OperationalError depuis sqlite3.connect, pas en OSError.
-            messagebox.showerror(APP_TITLE, f"La sauvegarde a echoue :\n{exc}")
+            opl_theme.message(
+                self.root, "Sauvegarde impossible",
+                f"La sauvegarde a echoue :\n{exc}",
+                ton="erreur")
             return
         messagebox.showinfo(
             APP_TITLE,

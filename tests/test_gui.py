@@ -33,6 +33,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import gui
 from gui import AUTO_LOCK_SECONDS, AUTO_LOCK_WARNING_SECONDS, CoffreApp, _is_valid_length_input
 
+# --- FILET ANTI-BLOCAGE -----------------------------------------------------
+# `opl_theme.message()` dessine une vraie fenetre modale qui attend un clic.
+# Un test qui emprunte un chemin d'erreur ferait pendre la suite ENTIERE : pas
+# d'echec, pas de trace, juste une execution qui ne finit jamais. On neutralise
+# donc le composant pour tout ce module. Les tests qui verifient un message le
+# repatchent localement — un patch imbrique prend le pas sur celui-ci.
+_filet_message = None
+
+
+def setUpModule():
+    # Imports locaux : les fichiers hotes ne nomment pas ces modules de la
+    # meme facon (`patch` ou `mock.patch`, `gui` ou `gui as gui_mod`, ou pas de
+    # gui du tout). `opl_theme` est le meme objet module que `gui.opl_theme`,
+    # le patch porte donc des deux cotes.
+    from unittest.mock import patch as _patch
+
+    import opl_theme as _theme
+
+    global _filet_message
+    _filet_message = _patch.object(_theme, "message")
+    _filet_message.start()
+
+
+def tearDownModule():
+    if _filet_message is not None:
+        _filet_message.stop()
+# ----------------------------------------------------------------------------
+
 
 def _find_widget(widget, predicate):
     """Recherche recursive du premier widget descendant (widget compris)
@@ -859,7 +887,7 @@ class DiskWriteFailureTestCase(GuiTestCase):
 
         save_button = _find_button(dialog, "Enregistrer")
         with patch.object(self.app.vault.db, "add_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
-            with patch("gui.messagebox.showerror") as mock_error:
+            with patch.object(gui.opl_theme, "message") as mock_error:
                 save_button.invoke()
                 self.root.update()
 
@@ -881,7 +909,7 @@ class DiskWriteFailureTestCase(GuiTestCase):
 
         save_button = _find_button(dialog, "Enregistrer")
         with patch.object(self.app.vault.db, "update_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
-            with patch("gui.messagebox.showerror") as mock_error:
+            with patch.object(gui.opl_theme, "message") as mock_error:
                 save_button.invoke()
                 self.root.update()
 
@@ -896,7 +924,7 @@ class DiskWriteFailureTestCase(GuiTestCase):
 
         with patch.object(self.app.vault.db, "delete_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
             with patch("gui.opl_theme.dialogue", return_value=True):
-                with patch("gui.messagebox.showerror") as mock_error:
+                with patch.object(gui.opl_theme, "message") as mock_error:
                     self.app._delete_selected_entry()
                     self.root.update()
 
@@ -1495,11 +1523,15 @@ class RemovableVaultDirTestCase(unittest.TestCase):
             (ancien / "coffre.sqlite").write_bytes(b"SQLite format 3\x00")
             vide = Path(tmp) / "SurLaCle"
             vide.mkdir()
+            fenetre = object()  # message() est mocke : un jeton suffit
             with patch.dict(os.environ, {"APPDATA": tmp}):
-                with patch.object(gui.messagebox, "showwarning") as alerte:
-                    gui._avertir_si_coffre_ailleurs(vide)
+                with patch.object(gui.opl_theme, "message") as alerte:
+                    gui._avertir_si_coffre_ailleurs(vide, fenetre)
             alerte.assert_called_once()
-            self.assertIn(str(ancien), alerte.call_args[0][1])
+            # Le parent doit ARRIVER jusqu'au message : cette fonction vit au
+            # niveau module, elle n'a aucun `self` ou puiser une fenetre.
+            self.assertIs(alerte.call_args[0][0], fenetre)
+            self.assertIn(str(ancien), alerte.call_args[0][2])
 
     def test_stays_silent_when_a_vault_already_exists_at_the_target(self):
         import tempfile
@@ -1511,9 +1543,10 @@ class RemovableVaultDirTestCase(unittest.TestCase):
             ancien = Path(tmp) / "Coffre"
             ancien.mkdir()
             (ancien / "coffre.sqlite").write_bytes(b"SQLite format 3\x00")
+            fenetre = object()  # message() est mocke : un jeton suffit
             with patch.dict(os.environ, {"APPDATA": tmp}):
-                with patch.object(gui.messagebox, "showwarning") as alerte:
-                    gui._avertir_si_coffre_ailleurs(cible)
+                with patch.object(gui.opl_theme, "message") as alerte:
+                    gui._avertir_si_coffre_ailleurs(cible, fenetre)
             alerte.assert_not_called()
 
     def test_stays_silent_on_a_first_run_with_no_vault_anywhere(self):
@@ -1522,9 +1555,10 @@ class RemovableVaultDirTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             vide = Path(tmp) / "SurLaCle"
             vide.mkdir()
+            fenetre = object()  # message() est mocke : un jeton suffit
             with patch.dict(os.environ, {"APPDATA": tmp}):
-                with patch.object(gui.messagebox, "showwarning") as alerte:
-                    gui._avertir_si_coffre_ailleurs(vide)
+                with patch.object(gui.opl_theme, "message") as alerte:
+                    gui._avertir_si_coffre_ailleurs(vide, fenetre)
             alerte.assert_not_called()
 
     @staticmethod
