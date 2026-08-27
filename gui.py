@@ -337,7 +337,7 @@ class CoffreApp:
     def __init__(self, root: Tk):
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("900x580")
+        self.root.geometry("1070x580")
         # 750px : la rangee du bas de la toolbar (Generateur/Mots de passe
         # reutilises/Mots de passe faibles/Sauvegarder/Changer le mot de
         # passe maitre) demande environ 711px une fois la fenetre
@@ -346,7 +346,7 @@ class CoffreApp:
         # valeur) la faisait deja legerement deborder au redimensionnement
         # minimal, exactement le probleme signale a l'audit pour la rangee
         # unique d'origine (1132px). 750px laisse une marge de securite.
-        self.root.minsize(750, 450)
+        self.root.minsize(920, 450)
 
         # "alt" est un theme entierement rendu par Tk (jamais delegue a
         # l'API de theming Windows), visuellement tres proche du rendu
@@ -413,7 +413,12 @@ class CoffreApp:
             except Exception:
                 pass
 
-        opl_theme.entete(self.root, "Coffre", "Gestionnaire de mots de passe", on_contact=lambda: opl_contact.ouvrir(self.root, app="Coffre", version=APP_VERSION), slug="coffre", version=APP_VERSION).pack(fill="x", side="top")
+        # Cette application n'a pas de navigation par vues : la colonne
+        # ne porte que la marque, Theme et Aide, et se pose a gauche.
+        opl_theme.entete(
+            self.root, "Coffre", "Gestionnaire de mots de passe",
+            on_contact=lambda: opl_contact.ouvrir(self.root, app="Coffre", version=APP_VERSION),
+            slug="coffre", version=APP_VERSION, avec_contenu=False).pack(side="left", fill="y")
 
         bottom_bar = ttk.Frame(self.root)
         bottom_bar.pack(fill=X, side="bottom")
@@ -690,7 +695,7 @@ class CoffreApp:
         # visible sans aucune scrollbar ni indication - "Verrouiller
         # maintenant" tronque, "Changer le mot de passe maitre..." (une
         # fonctionnalite de securite) totalement invisible. Aggrave encore
-        # par minsize(700, 450) en cas de redimensionnement vers le bas.
+        # par minsize(870, 450) en cas de redimensionnement vers le bas.
         # Rechercher/Verrouiller restent sur la rangee du haut (toujours
         # visibles en premier), les actions secondaires sur la rangee du
         # bas - la somme des largeurs par rangee reste sous la largeur
