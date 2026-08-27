@@ -558,8 +558,11 @@ class CoffreApp:
         ).pack(pady=(0, 12))
 
         def on_create():
+            erreur.effacer()
             if self._create_password_var.get() != self._create_confirm_var.get():
-                messagebox.showwarning(APP_TITLE, "Les deux mots de passe ne correspondent pas.")
+                erreur.montrer("Confirmation",
+                               "Les deux mots de passe ne correspondent pas.",
+                               champ=entry2)
                 return
             # derive_key (scrypt) prend ~550ms mesures (constat d'audit G5 :
             # ce chiffre a change avec le renforcement du KDF, SCRYPT_N
@@ -577,7 +580,10 @@ class CoffreApp:
             try:
                 self.vault.create(self._create_password_var.get())
             except VaultError as exc:
-                messagebox.showwarning(APP_TITLE, str(exc))
+                # Le message vient du coffre lui-meme (longueur minimale,
+                # coffre deja existant...) : il nomme deja ce qui ne va pas,
+                # d'ou un intitule vide plutot qu'un titre invente.
+                erreur.montrer("", str(exc), champ=entry1)
                 return
             finally:
                 create_button.config(state="normal")
@@ -588,6 +594,7 @@ class CoffreApp:
 
         create_button = ttk.Button(frame, text="Creer le coffre", command=on_create, style="Accent.TButton")
         create_button.pack()
+        erreur = opl_theme.Erreur(frame, apres=create_button)
         self._focus_creation_entry = entry1
         entry1.bind("<Return>", lambda event: entry2.focus_set())
         entry2.bind("<Return>", lambda event: on_create())
@@ -915,21 +922,29 @@ class CoffreApp:
         title_entry = ttk.Entry(dialog, textvariable=title_var, width=40)
         title_entry.grid(row=0, column=1, columnspan=2, padx=10, pady=(10, 0), sticky="we")
 
-        ttk.Label(dialog, text="Identifiant", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
-        ttk.Entry(dialog, textvariable=username_var, width=40).grid(row=1, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+        # Ce dialogue est en `grid` : l'erreur ne peut pas s'y poser
+        # directement, son `montrer()` fait un `pack()` et melanger les deux
+        # gestionnaires dans un meme parent leve une TclError. Elle vit donc
+        # dans une porte, gridee SOUS le champ qu'elle sert.
+        porte_erreur = ttk.Frame(dialog)
+        porte_erreur.grid(row=1, column=0, columnspan=4, sticky="we")
+        erreur = opl_theme.Erreur(porte_erreur)
 
-        ttk.Label(dialog, text="Mot de passe", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Identifiant", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Entry(dialog, textvariable=username_var, width=40).grid(row=2, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+
+        ttk.Label(dialog, text="Mot de passe", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=3, column=0, sticky="w", padx=10, pady=(5, 0))
         password_entry = ttk.Entry(dialog, textvariable=password_var, show="*", width=30)
-        password_entry.grid(row=2, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
+        password_entry.grid(row=3, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
 
         def toggle_show():
             password_entry.configure(show="" if show_password.get() else "*")
 
-        ttk.Checkbutton(dialog, text="Afficher", variable=show_password, command=toggle_show).grid(row=2, column=2, padx=(5, 10), pady=(5, 0))
+        ttk.Checkbutton(dialog, text="Afficher", variable=show_password, command=toggle_show).grid(row=3, column=2, padx=(5, 10), pady=(5, 0))
 
         strength_var = StringVar()
         strength_label = ttk.Label(dialog, textvariable=strength_var, font=BODY_FONT)
-        strength_label.grid(row=3, column=2, sticky="w", padx=(5, 10), pady=(2, 0))
+        strength_label.grid(row=4, column=2, sticky="w", padx=(5, 10), pady=(2, 0))
 
         def update_strength(*_args):
             strength = password_strength(password_var.get())
@@ -972,26 +987,26 @@ class CoffreApp:
         ttk.Button(
             dialog, text="Generer...",
             command=lambda: self._open_generator_dialog(target_var=password_var, parent=dialog),
-        ).grid(row=3, column=1, sticky="w", padx=10, pady=(2, 0))
+        ).grid(row=4, column=1, sticky="w", padx=10, pady=(2, 0))
 
-        ttk.Label(dialog, text="Site / URL", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=4, column=0, sticky="w", padx=10, pady=(5, 0))
-        ttk.Entry(dialog, textvariable=url_var, width=40).grid(row=4, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+        ttk.Label(dialog, text="Site / URL", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=5, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Entry(dialog, textvariable=url_var, width=40).grid(row=5, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
 
         # -- Secret 2FA (TOTP), champ optionnel --------------------------------
-        ttk.Label(dialog, text="Secret 2FA (TOTP)", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=5, column=0, sticky="w", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Secret 2FA (TOTP)", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=6, column=0, sticky="w", padx=10, pady=(5, 0))
         totp_entry = ttk.Entry(dialog, textvariable=totp_var, show="*", width=30)
-        totp_entry.grid(row=5, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
+        totp_entry.grid(row=6, column=1, padx=(10, 0), pady=(5, 0), sticky="we")
 
         def toggle_show_totp():
             totp_entry.configure(show="" if show_totp.get() else "*")
 
-        ttk.Checkbutton(dialog, text="Afficher", variable=show_totp, command=toggle_show_totp).grid(row=5, column=2, padx=(5, 10), pady=(5, 0))
+        ttk.Checkbutton(dialog, text="Afficher", variable=show_totp, command=toggle_show_totp).grid(row=6, column=2, padx=(5, 10), pady=(5, 0))
 
         # Zone d'affichage du code courant : n'apparait (grid) que lorsqu'un
         # secret valide est saisi, et se met a jour chaque seconde (voir
         # refresh_totp / schedule_totp ci-dessous).
         totp_display = ttk.Frame(dialog)
-        totp_display.grid(row=6, column=0, columnspan=3, padx=10, pady=(2, 0), sticky="we")
+        totp_display.grid(row=7, column=0, columnspan=3, padx=10, pady=(2, 0), sticky="we")
         totp_display.columnconfigure(1, weight=1)
         totp_code_var = StringVar(value="")
         totp_status_var = StringVar(value="")
@@ -1071,16 +1086,19 @@ class CoffreApp:
         refresh_totp()
         totp_job[0] = dialog.after(1000, tick)
 
-        ttk.Label(dialog, text="Notes", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=7, column=0, sticky="nw", padx=10, pady=(5, 0))
+        ttk.Label(dialog, text="Notes", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=8, column=0, sticky="nw", padx=10, pady=(5, 0))
         from tkinter import Text
         notes_text = Text(dialog, width=40, height=5, wrap="word")
         notes_text.insert("1.0", entry["notes"] if entry else "")
-        notes_text.grid(row=7, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+        notes_text.grid(row=8, column=1, columnspan=2, padx=10, pady=(5, 0), sticky="we")
+
 
         def on_save():
+            erreur.effacer()
             title = title_var.get().strip()
             if not title:
-                messagebox.showwarning(APP_TITLE, "Le titre ne peut pas etre vide.", parent=dialog)
+                erreur.montrer("Titre", "Le titre ne peut pas etre vide.",
+                               champ=title_entry)
                 return
             # Secret 2FA : optionnel. On le normalise (base32, insensible aux
             # espaces/casse) et on ne stocke QUE la forme normalisee valide.
@@ -1107,7 +1125,7 @@ class CoffreApp:
                 else:
                     self.vault.add_entry(**fields)
             except VaultError as exc:
-                messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
+                erreur.montrer("", str(exc), champ=title_entry)
                 return
             except (OSError, ValueError, sqlite3.Error) as exc:
                 # sqlite3.Error/OSError en plus de VaultError : un echec
@@ -1149,7 +1167,9 @@ class CoffreApp:
     def _delete_selected_entry(self):
         entry_id = self._selected_entry_id_from_tree()
         if entry_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une entree d'abord.")
+            self.statut.dire(
+                "Selectionnez une entree d'abord.",
+                ton="alerte")
             return
         entry = self.vault.get_entry(entry_id)
         if entry is None:
@@ -1181,7 +1201,9 @@ class CoffreApp:
     def _copy_field(self, field: str):
         entry_id = self._selected_entry_id_from_tree()
         if entry_id is None:
-            messagebox.showinfo(APP_TITLE, "Selectionnez une entree d'abord.")
+            self.statut.dire(
+                "Selectionnez une entree d'abord.",
+                ton="alerte")
             return
         entry = self.vault.get_entry(entry_id)
         if entry is None:
@@ -1267,16 +1289,24 @@ class CoffreApp:
         )
         length_spinbox.grid(row=0, column=1, sticky="w", padx=10, pady=(10, 0))
 
-        ttk.Checkbutton(dialog, text="Majuscules (A-Z)", variable=use_upper).grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
-        ttk.Checkbutton(dialog, text="Minuscules (a-z)", variable=use_lower).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
-        ttk.Checkbutton(dialog, text="Chiffres (0-9)", variable=use_digits).grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
-        ttk.Checkbutton(dialog, text="Symboles (!@#...)", variable=use_symbols).grid(row=4, column=0, columnspan=2, sticky="w", padx=10)
-        ttk.Checkbutton(dialog, text="Eviter les caracteres ambigus (0/O, 1/l/I...)", variable=avoid_ambiguous).grid(row=5, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 5))
+        # La porte vit SOUS le champ, pas en fin de dialogue : mesure, une
+        # porte posee en derniere ligne mettait l'erreur a 256 px du champ
+        # qu'elle nomme, dans un dialogue qui n'en fait que 299.
+        porte_erreur = ttk.Frame(dialog)
+        porte_erreur.grid(row=1, column=0, columnspan=2, sticky="we")
+        erreur = opl_theme.Erreur(porte_erreur)
+
+        ttk.Checkbutton(dialog, text="Majuscules (A-Z)", variable=use_upper).grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Checkbutton(dialog, text="Minuscules (a-z)", variable=use_lower).grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Checkbutton(dialog, text="Chiffres (0-9)", variable=use_digits).grid(row=4, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Checkbutton(dialog, text="Symboles (!@#...)", variable=use_symbols).grid(row=5, column=0, columnspan=2, sticky="w", padx=10)
+        ttk.Checkbutton(dialog, text="Eviter les caracteres ambigus (0/O, 1/l/I...)", variable=avoid_ambiguous).grid(row=6, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 5))
 
         result_entry = ttk.Entry(dialog, textvariable=result_var, width=36, state="readonly", font=("Consolas", 10))
-        result_entry.grid(row=6, column=0, columnspan=2, padx=10, pady=(5, 5), sticky="we")
+        result_entry.grid(row=7, column=0, columnspan=2, padx=10, pady=(5, 5), sticky="we")
 
         def do_generate():
+            erreur.effacer()
             try:
                 length = length_var.get()
             except TclError:
@@ -1287,9 +1317,9 @@ class CoffreApp:
                 # du callback du bouton "Regenerer" : dans l'executable
                 # package (sans console), Tkinter l'avale silencieusement et
                 # le bouton semble ne rien faire, sans aucun message.
-                messagebox.showwarning(
-                    APP_TITLE, "La longueur doit etre un nombre entier (entre 4 et 128).", parent=dialog,
-                )
+                erreur.montrer("Longueur",
+                               "Indiquez un nombre entier entre 4 et 128.",
+                               champ=length_spinbox)
                 return
             try:
                 result_var.set(generate_password(
@@ -1297,7 +1327,7 @@ class CoffreApp:
                     use_digits=use_digits.get(), use_symbols=use_symbols.get(), avoid_ambiguous=avoid_ambiguous.get(),
                 ))
             except VaultError as exc:
-                messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
+                erreur.montrer("", str(exc), champ=length_spinbox)
 
         # Audit C3 : uniformise Entree=valider avec le reste du logiciel -
         # lie uniquement sur le champ de longueur (pas tout le dialogue,
@@ -1458,12 +1488,14 @@ class CoffreApp:
         confirm_var = StringVar()
 
         ttk.Label(dialog, text="Mot de passe actuel", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=0, column=0, sticky="w", padx=10, pady=(10, 0))
-        ttk.Entry(dialog, textvariable=current_var, show="*", width=32).grid(row=0, column=1, padx=10, pady=(10, 0))
+        current_entry = ttk.Entry(dialog, textvariable=current_var, show="*", width=32)
+        current_entry.grid(row=0, column=1, padx=10, pady=(10, 0))
         ttk.Label(dialog, text="Nouveau mot de passe", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=1, column=0, sticky="w", padx=10, pady=(5, 0))
         new_entry = ttk.Entry(dialog, textvariable=new_var, show="*", width=32)
         new_entry.grid(row=1, column=1, padx=10, pady=(5, 0))
         ttk.Label(dialog, text="Confirmer le nouveau", foreground=opl_theme.couleur("texte"), font=BODY_FONT).grid(row=2, column=0, sticky="w", padx=10, pady=(5, 0))
-        ttk.Entry(dialog, textvariable=confirm_var, show="*", width=32).grid(row=2, column=1, padx=10, pady=(5, 0))
+        confirm_entry = ttk.Entry(dialog, textvariable=confirm_var, show="*", width=32)
+        confirm_entry.grid(row=2, column=1, padx=10, pady=(5, 0))
 
         # Audit A3 : meme indicateur de solidite que sur l'ecran de
         # creation du coffre et le dialogue d'ajout d'entree, applique ici
@@ -1478,6 +1510,10 @@ class CoffreApp:
         strength_var = StringVar()
         strength_label = ttk.Label(dialog, textvariable=strength_var, font=BODY_FONT)
         strength_label.grid(row=1, column=2, sticky="w", padx=(5, 10), pady=(5, 0))
+
+        porte_erreur = ttk.Frame(dialog)          # voir _open_entry_dialog
+        porte_erreur.grid(row=3, column=0, columnspan=3, sticky="we")
+        erreur = opl_theme.Erreur(porte_erreur)
 
         def update_strength(*_args):
             pw = new_var.get()
@@ -1498,8 +1534,11 @@ class CoffreApp:
         new_entry.bind("<Destroy>", remove_strength_trace, add="+")
 
         def on_save():
+            erreur.effacer()
             if new_var.get() != confirm_var.get():
-                messagebox.showwarning(APP_TITLE, "Les deux nouveaux mots de passe ne correspondent pas.", parent=dialog)
+                erreur.montrer("Confirmation",
+                               "Les deux nouveaux mots de passe ne correspondent pas.",
+                               champ=confirm_entry)
                 return
             # change_master_password derive DEUX cles scrypt (ancien puis
             # nouveau mot de passe), donc ~2x550ms mesures ici (constat
@@ -1513,7 +1552,9 @@ class CoffreApp:
             try:
                 self.vault.change_master_password(current_var.get(), new_var.get())
             except VaultError as exc:
-                messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
+                # Mot de passe actuel refuse, nouveau trop court : le coffre
+                # dit lequel, on ne devine pas a sa place.
+                erreur.montrer("", str(exc), champ=current_entry)
                 return
             finally:
                 save_button.config(state="normal")

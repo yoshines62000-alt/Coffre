@@ -82,6 +82,13 @@ def _find_spinbox(widget):
     return _find_widget(widget, lambda w: w.winfo_class() == "TSpinbox")
 
 
+def _trouver_erreur(widget):
+    """L'`opl_theme.Erreur` d'un dialogue, ou None. Les erreurs de saisie ne
+    sont plus des modales : on affirme donc sur le composant que
+    l'utilisateur voit reellement, dans la fenetre ou il travaille."""
+    return _find_widget(widget, lambda w: isinstance(w, gui.opl_theme.Erreur))
+
+
 def _find_readonly_entry(widget):
     return _find_widget(widget, lambda w: w.winfo_class() == "TEntry" and str(w.cget("state")) == "readonly")
 
@@ -294,11 +301,12 @@ class GeneratorDialogSmokeTestCase(GuiTestCase):
         self.root.update()
 
         regen_button = _find_button(dialog, "Regenerer")
-        with patch("gui.messagebox.showwarning") as mock_warn:
-            regen_button.invoke()
-            self.root.update()
+        regen_button.invoke()
+        self.root.update()
 
-        mock_warn.assert_called_once()
+        erreur = _trouver_erreur(dialog)
+        self.assertTrue(erreur.visible)
+        self.assertIn("entier", erreur.texte)
         self.assertTrue(dialog.winfo_exists())
         dialog.destroy()
 
@@ -311,11 +319,14 @@ class GeneratorDialogSmokeTestCase(GuiTestCase):
         self.root.update()
 
         regen_button = _find_button(dialog, "Regenerer")
-        with patch("gui.messagebox.showwarning") as mock_warn:
-            regen_button.invoke()
-            self.root.update()
+        regen_button.invoke()
+        self.root.update()
 
-        mock_warn.assert_called_once()
+        # L'erreur reste DANS le dialogue, sous le champ fautif : elle ne
+        # masque plus la valeur a corriger et ne demande aucun clic.
+        erreur = _trouver_erreur(dialog)
+        self.assertTrue(erreur.visible)
+        self.assertIn("entier", erreur.texte)
         dialog.destroy()
 
     def test_regenerate_with_a_valid_length_still_produces_a_password(self):
