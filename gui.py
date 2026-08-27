@@ -1466,12 +1466,15 @@ class CoffreApp:
                 f"La sauvegarde a echoue :\n{exc}",
                 ton="erreur")
             return
-        messagebox.showinfo(
-            APP_TITLE,
+        # Pas une barre d'etat : ce message porte une GARANTIE que
+        # l'utilisateur doit lire une fois — la copie reste chiffree par le
+        # meme mot de passe. La tronquer serait pire que de ne rien dire.
+        opl_theme.message(
+            self.root, "Copie enregistree",
             f"Copie du coffre enregistree :\n{dest}\n\n"
             "Cette copie est chiffree et reste protegee par le meme mot de "
             "passe maitre que le coffre actuel.",
-        )
+            ton="info")
 
     # -- changement de mot de passe maitre ---------------------------------------
 
