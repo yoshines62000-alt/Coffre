@@ -1141,7 +1141,12 @@ class CoffreApp:
         entry = self.vault.get_entry(entry_id)
         if entry is None:
             return
-        if not messagebox.askyesno(APP_TITLE, f"Supprimer l'entree '{entry['title']}' ?"):
+        if not opl_theme.dialogue(
+            self.root, "Supprimer une entree",
+            f"« {entry['title']} » sera definitivement supprimee du coffre, avec son "
+            "identifiant, son mot de passe et ses notes. Cette suppression ne se "
+            "rattrape pas : le coffre ne garde pas de corbeille.",
+            confirmer="Supprimer l'entree", danger=True):
             return
         try:
             self.vault.delete_entry(entry_id)

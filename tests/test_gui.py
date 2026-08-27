@@ -894,7 +894,7 @@ class DiskWriteFailureTestCase(GuiTestCase):
         self.root.update()
 
         with patch.object(self.app.vault.db, "delete_entry", side_effect=sqlite3.OperationalError("database or disk is full")):
-            with patch("gui.messagebox.askyesno", return_value=True):
+            with patch("gui.opl_theme.dialogue", return_value=True):
                 with patch("gui.messagebox.showerror") as mock_error:
                     self.app._delete_selected_entry()
                     self.root.update()
